@@ -1,7 +1,6 @@
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
-import { z } from "zod";
 import { GitHubHandler } from "./github-handler";
 import type { Props } from "./utils";
 
