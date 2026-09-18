@@ -102,10 +102,22 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 			"Read-only diagnostic for CloudBase Worker runtime bindings and Tencent endpoint reachability. Never returns secret values.",
 			{},
 			async () => {
-				const [domesticApi, authApi] = await Promise.all([
-					probeEndpoint("https://tcb-api.tencentcloudapi.com"),
-					probeEndpoint("https://tcb-api.tencentcloud.com"),
-				]);
+				const envId = process.env.CLOUDBASE_ENV_ID;
+				const exchangeBase = envId
+					? `https://${envId}.ap-shanghai.tcb-api.tencentcloudapi.com`
+					: null;
+
+				const [domesticApi, authApi, envExchangeRoot, envAuthCerts] =
+					await Promise.all([
+						probeEndpoint("https://tcb-api.tencentcloudapi.com"),
+						probeEndpoint("https://tcb-api.tencentcloud.com"),
+						exchangeBase
+							? probeEndpoint(exchangeBase)
+							: Promise.resolve(null),
+						exchangeBase
+							? probeEndpoint(`${exchangeBase}/auth/v1/certs`)
+							: Promise.resolve(null),
+					]);
 
 				return {
 					content: [
@@ -113,13 +125,15 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 							type: "text",
 							text: JSON.stringify({
 								apiKeyPresent: Boolean(process.env.CLOUDBASE_API_KEY),
-								envId: process.env.CLOUDBASE_ENV_ID ?? null,
+								envId: envId ?? null,
 								site: process.env.TCB_SITE ?? null,
 								lang: process.env.TCB_LANG ?? null,
 								cloudMode: process.env.CLOUDBASE_MCP_CLOUD_MODE ?? null,
 								endpoints: {
 									tcbApiTencentcloudapiCom: domesticApi,
 									tcbApiTencentcloudCom: authApi,
+									envSpecificExchangeRoot: envExchangeRoot,
+									envSpecificAuthCerts: envAuthCerts,
 								},
 							}),
 						},
