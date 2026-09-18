@@ -64,6 +64,10 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 		if (runtimeEnv.TCB_LANG) {
 			process.env.TCB_LANG = runtimeEnv.TCB_LANG;
 		}
+
+		// CloudBase Toolbox persists temporary auth state under cwd. Workers only
+		// exposes /tmp as writable; it is intentionally ephemeral per request.
+		process.env.WORKSPACE_FOLDER_PATHS = "/tmp";
 		process.env.CLOUDBASE_MCP_CLOUD_MODE = "true";
 
 		this.server.tool(
@@ -312,7 +316,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 					const authSupervisor = AuthSupervisor.getInstance({});
 					const outcome = await Promise.race([
 						authSupervisor
-							.loginByApiKey(apiKey, envId, { cwd: "/" })
+							.loginByApiKey(apiKey, envId, { cwd: "/tmp" })
 							.then((credential: any) => ({
 								kind: "completed" as const,
 								credential,
