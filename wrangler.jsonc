@@ -15,7 +15,8 @@
 		"__filename": "\"/worker.js\""
 	},
 	"alias": {
-		"@aws-sdk/client-s3": "./src/aws-s3-stub.ts"
+		"@aws-sdk/client-s3": "./src/aws-s3-stub.ts",
+		"graceful-fs": "./src/graceful-fs-compat.ts"
 	},
 	"vars": {
 		"GITHUB_CLIENT_ID": "Ov23libkN7B3D45CTXve",
