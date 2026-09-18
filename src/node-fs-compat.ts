@@ -22,7 +22,7 @@ function normalizeEncodingOptions<T>(options: T): T {
 	return options;
 }
 
-const require = createRequire(import.meta.url);
+const require = createRequire("/worker.js");
 const fs = require("node:fs") as any;
 
 if (!fs.__cloudbaseEncodingCompatPatched) {
