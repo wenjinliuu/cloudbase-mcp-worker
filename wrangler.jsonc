@@ -1,6 +1,7 @@
 /**
- * Private CloudBase MCP gateway
- * ChatGPT -> GitHub OAuth -> Cloudflare Worker -> Tencent Hosted MCP
+ * CloudBase MCP Worker
+ * ChatGPT -> GitHub OAuth -> Cloudflare Worker -> Tencent CloudBase
+ * CloudBase uses an environment-scoped API key, not account-level SecretId/SecretKey.
  */
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
@@ -9,9 +10,20 @@
 	"compatibility_date": "2026-09-18",
 	"compatibility_flags": ["nodejs_compat"],
 	"keep_vars": true,
+	"define": {
+		"__dirname": "\"/\"",
+		"__filename": "\"/worker.js\""
+	},
+	"alias": {
+		"@aws-sdk/client-s3": "./src/aws-s3-stub.ts",
+		"graceful-fs": "./src/graceful-fs-compat.ts",
+		"@cloudbase/manager-node": "./src/manager-node-compat.ts"
+	},
 	"vars": {
 		"GITHUB_CLIENT_ID": "Ov23libkN7B3D45CTXve",
-		"CLOUDBASE_ENV_ID": "wenjin-cloudbase-d1empq882391ac1"
+		"CLOUDBASE_ENV_ID": "wenjin-cloudbase-d1empq882391ac1",
+		"TCB_SITE": "domestic",
+		"TCB_LANG": "zh"
 	},
 	"secrets": {
 		"required": [
@@ -28,8 +40,20 @@
 		{
 			"deleted_classes": ["MyMCP"],
 			"tag": "v2"
+		},
+		{
+			"new_sqlite_classes": ["MyMCPRestored"],
+			"tag": "v3"
 		}
 	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"class_name": "MyMCPRestored",
+				"name": "MCP_OBJECT"
+			}
+		]
+	},
 	"kv_namespaces": [
 		{
 			"binding": "OAUTH_KV",
