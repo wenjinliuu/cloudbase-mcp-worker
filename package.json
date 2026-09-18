@@ -9,7 +9,8 @@
 		"lint:fix": "oxlint --fix",
 		"start": "wrangler dev",
 		"cf-typegen": "wrangler types",
-		"type-check": "tsc --noEmit"
+		"type-check": "tsc --noEmit",
+		"deploy:hosted-test": "wrangler deploy --config wrangler.hosted-test.jsonc"
 	},
 	"dependencies": {
 		"@cloudbase/cals": "^1.2.23",
