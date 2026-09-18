@@ -1,139 +1,614 @@
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
+import { createCloudBaseMcpServer } from "@cloudbase/cloudbase-mcp";
+import { AuthSupervisor } from "@cloudbase/toolbox";
+import * as ManagerInteropModule from "@cloudbase/manager-node";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpAgent } from "agents/mcp";
 import { GitHubHandler } from "./github-handler";
+import type { Props } from "./utils";
 
-const CLOUDBASE_HOSTED_MCP = "https://tcb-api.cloud.tencent.com/mcp/v1";
-
-// Tencent's hosted MCP E2E suite currently pins this negotiated version.
-// Rewriting only the initialize request keeps newer MCP clients compatible
-// with the hosted endpoint without changing tool payloads.
-const CLOUDBASE_PROTOCOL_VERSION = "2025-06-18";
-
-type ProxyEnv = Env & {
+type CloudBaseRuntimeEnv = Env & {
 	CLOUDBASE_API_KEY?: string;
 	CLOUDBASE_ENV_ID?: string;
+	TCB_SITE?: string;
+	TCB_LANG?: string;
 };
 
-function cleanForwardHeaders(source: Headers, apiKey: string): Headers {
-	const headers = new Headers(source);
-
-	// The incoming Authorization header authenticates ChatGPT to this Worker.
-	// Never forward it upstream. Tencent Hosted MCP receives only the
-	// environment-scoped CloudBase API Key.
-	headers.set("Authorization", `Bearer ${apiKey}`);
-
-	for (const name of [
-		"host",
-		"content-length",
-		"cookie",
-		"cf-connecting-ip",
-		"cf-ipcountry",
-		"cf-ray",
-		"cf-visitor",
-		"x-forwarded-for",
-		"x-forwarded-proto",
-		"x-real-ip",
-	]) {
-		headers.delete(name);
-	}
-
-	return headers;
-}
-
-async function proxyToCloudBase(
-	request: Request,
-	env: ProxyEnv,
-): Promise<Response> {
-	const apiKey = env.CLOUDBASE_API_KEY;
-	const envId = env.CLOUDBASE_ENV_ID;
-
-	if (!apiKey || !envId) {
-		return new Response(
-			JSON.stringify({
-				error: "CloudBase upstream credentials are not configured.",
-			}),
-			{
-				status: 500,
-				headers: { "Content-Type": "application/json" },
-			},
-		);
-	}
-
-	const upstreamUrl = new URL(CLOUDBASE_HOSTED_MCP);
-	upstreamUrl.searchParams.set("env_id", envId);
-
-	const headers = cleanForwardHeaders(request.headers, apiKey);
-	let body: BodyInit | null | undefined;
-
-	if (request.method !== "GET" && request.method !== "HEAD") {
-		const contentType = request.headers.get("content-type") ?? "";
-
-		if (
-			request.method === "POST" &&
-			contentType.toLowerCase().includes("application/json")
-		) {
-			const raw = await request.text();
-
-			try {
-				const message = JSON.parse(raw);
-				if (
-					message &&
-					!Array.isArray(message) &&
-					message.method === "initialize" &&
-					message.params &&
-					typeof message.params === "object"
-				) {
-					message.params.protocolVersion = CLOUDBASE_PROTOCOL_VERSION;
-					body = JSON.stringify(message);
-					headers.set("Content-Type", "application/json");
-				} else {
-					body = raw;
-				}
-			} catch {
-				body = raw;
-			}
-		} else {
-			body = request.body;
-		}
-	}
-
-	// If a newer client sends the protocol header before/after negotiation,
-	// present the hosted endpoint with the version it currently supports.
-	if (headers.has("MCP-Protocol-Version")) {
-		headers.set("MCP-Protocol-Version", CLOUDBASE_PROTOCOL_VERSION);
-	}
+async function probeEndpoint(url: string) {
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), 5000);
+	const startedAt = Date.now();
 
 	try {
-		return await fetch(upstreamUrl.toString(), {
-			method: request.method,
-			headers,
-			body,
+		const response = await fetch(url, {
+			method: "GET",
+			signal: controller.signal,
 			redirect: "manual",
 		});
+
+		return {
+			ok: true,
+			status: response.status,
+			durationMs: Date.now() - startedAt,
+		};
 	} catch (error) {
-		console.error(
-			"CloudBase Hosted MCP proxy error:",
-			error instanceof Error ? error.message : String(error),
-		);
-		return new Response(
-			JSON.stringify({
-				error: "CloudBase Hosted MCP upstream request failed.",
-			}),
-			{
-				status: 502,
-				headers: { "Content-Type": "application/json" },
-			},
-		);
+		return {
+			ok: false,
+			durationMs: Date.now() - startedAt,
+			error: error instanceof Error ? error.message : String(error),
+		};
+	} finally {
+		clearTimeout(timeout);
 	}
 }
 
-const apiHandler = {
-	async fetch(request: Request, env: ProxyEnv) {
-		return proxyToCloudBase(request, env);
-	},
-};
+export class MyMCPRestored extends McpAgent<Env, Record<string, never>, Props> {
+	server = new McpServer({
+		name: "CloudBase MCP",
+		version: "1.0.0",
+	});
+
+	async init() {
+		// CloudBase's official Node MCP reads credentials from process.env.
+		// Copy Worker/Durable Object bindings explicitly so the package does not
+		// depend on runtime-specific process.env auto-population behavior.
+		const runtimeEnv = this.env as CloudBaseRuntimeEnv;
+		if (runtimeEnv.CLOUDBASE_API_KEY) {
+			process.env.CLOUDBASE_API_KEY = runtimeEnv.CLOUDBASE_API_KEY;
+		}
+		if (runtimeEnv.CLOUDBASE_ENV_ID) {
+			process.env.CLOUDBASE_ENV_ID = runtimeEnv.CLOUDBASE_ENV_ID;
+		}
+		if (runtimeEnv.TCB_SITE) {
+			process.env.TCB_SITE = runtimeEnv.TCB_SITE;
+		}
+		if (runtimeEnv.TCB_LANG) {
+			process.env.TCB_LANG = runtimeEnv.TCB_LANG;
+		}
+
+		// CloudBase Toolbox persists temporary auth state under cwd. Workers only
+		// exposes /tmp as writable; it is intentionally ephemeral per request.
+		process.env.WORKSPACE_FOLDER_PATHS = "/tmp";
+		process.env.CLOUDBASE_MCP_CLOUD_MODE = "true";
+
+		this.server.tool(
+			"ping",
+			"Verify that the authenticated ChatGPT connection can reach this private MCP server.",
+			{},
+			async () => ({
+				content: [
+					{
+						type: "text",
+						text: `pong — authenticated as GitHub user ${this.props!.login}`,
+					},
+				],
+			}),
+		);
+
+		this.server.tool(
+			"authenticatedUser",
+			"Return the GitHub account that authenticated this private MCP connection.",
+			{},
+			async () => ({
+				content: [
+					{
+						type: "text",
+						text: JSON.stringify({
+							login: this.props!.login,
+							name: this.props!.name,
+							email: this.props!.email,
+						}),
+					},
+				],
+			}),
+		);
+
+		this.server.tool(
+			"cloudbaseRuntimeProbe",
+			"Read-only diagnostic for CloudBase Worker runtime bindings and Tencent endpoint reachability. Never returns secret values.",
+			{},
+			async () => {
+				const envId = process.env.CLOUDBASE_ENV_ID;
+				const exchangeBase = envId
+					? `https://${envId}.ap-shanghai.tcb-api.tencentcloudapi.com`
+					: null;
+
+				const [domesticApi, authApi, envExchangeRoot, envAuthCerts] =
+					await Promise.all([
+						probeEndpoint("https://tcb-api.tencentcloudapi.com"),
+						probeEndpoint("https://tcb-api.tencentcloud.com"),
+						exchangeBase
+							? probeEndpoint(exchangeBase)
+							: Promise.resolve(null),
+						exchangeBase
+							? probeEndpoint(`${exchangeBase}/auth/v1/certs`)
+							: Promise.resolve(null),
+					]);
+
+				return {
+					content: [
+						{
+							type: "text",
+							text: JSON.stringify({
+								apiKeyPresent: Boolean(process.env.CLOUDBASE_API_KEY),
+								envId: envId ?? null,
+								site: process.env.TCB_SITE ?? null,
+								lang: process.env.TCB_LANG ?? null,
+								cloudMode: process.env.CLOUDBASE_MCP_CLOUD_MODE ?? null,
+								endpoints: {
+									tcbApiTencentcloudapiCom: domesticApi,
+									tcbApiTencentcloudCom: authApi,
+									envSpecificExchangeRoot: envExchangeRoot,
+									envSpecificAuthCerts: envAuthCerts,
+								},
+							}),
+						},
+					],
+				};
+			},
+		);
+
+		const cloudBaseServer = await createCloudBaseMcpServer({
+			name: "Tencent CloudBase",
+			version: "2.34.4",
+			enableTelemetry: false,
+			cloudMode: true,
+			lang: "zh",
+		});
+
+		const officialAuthTool = cloudBaseServer.toolDefs.find(
+			(tool) => tool.name === "auth",
+		);
+
+		this.server.tool(
+			"cloudbaseAuthProbe",
+			"Read-only diagnostic for the official CloudBase API-key authentication exchange. It uses the configured Worker secret internally and never returns credential values.",
+			{},
+			async () => {
+				if (!officialAuthTool) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: false,
+									stage: "tool_lookup",
+									error: "Official CloudBase auth tool not found.",
+								}),
+							},
+						],
+					};
+				}
+
+				const apiKey = process.env.CLOUDBASE_API_KEY;
+				const envId = process.env.CLOUDBASE_ENV_ID;
+				if (!apiKey || !envId) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: false,
+									stage: "bindings",
+									apiKeyPresent: Boolean(apiKey),
+									envIdPresent: Boolean(envId),
+								}),
+							},
+						],
+					};
+				}
+
+				const startedAt = Date.now();
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				try {
+					const outcome = await Promise.race([
+						officialAuthTool.handler({
+							action: "login_by_api_key",
+							apiKey,
+							apiKeyEnvId: envId,
+							site: process.env.TCB_SITE ?? "domestic",
+							lang: process.env.TCB_LANG ?? "zh",
+						}).then((result) => ({
+							kind: "completed" as const,
+							result,
+						})),
+						new Promise<{ kind: "timeout" }>((resolve) => {
+							timer = setTimeout(
+								() => resolve({ kind: "timeout" as const }),
+								12000,
+							);
+						}),
+					]);
+
+					if (outcome.kind === "timeout") {
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										ok: false,
+										stage: "official_auth_login_by_api_key",
+										outcome: "timeout",
+										durationMs: Date.now() - startedAt,
+										apiKeyPresent: true,
+										envId,
+										site: process.env.TCB_SITE ?? "domestic",
+										note: "Official auth handler did not return within 12 seconds.",
+									}),
+								},
+							],
+						};
+					}
+
+					const authRaw = JSON.stringify(outcome.result);
+					const authSafePreview = authRaw
+						.replace(/"(secretId|secretKey|token|sessionToken|apiKey)"\\s*:\\s*"[^"]*"/gi, '"$1":"[redacted]"')
+						.replace(/CloudBase API Key[^\\n]*/gi, "CloudBase API Key [redacted]")
+						.slice(0, 6000);
+
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: true,
+									stage: "official_auth_login_by_api_key",
+									outcome: "completed",
+									durationMs: Date.now() - startedAt,
+									apiKeyPresent: true,
+									envId,
+									site: process.env.TCB_SITE ?? "domestic",
+									resultPreview: authSafePreview,
+								}),
+							},
+						],
+					};
+				} catch (error) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: false,
+									stage: "official_auth_login_by_api_key",
+									outcome: "error",
+									durationMs: Date.now() - startedAt,
+									error:
+										error instanceof Error
+											? error.message
+											: String(error),
+								}),
+							},
+						],
+					};
+				} finally {
+					if (timer) clearTimeout(timer);
+				}
+			},
+		);
+
+		this.server.tool(
+			"cloudbaseApiKeyExchangeProbe",
+			"Read-only low-level diagnostic for CloudBase API-key exchange. Calls @cloudbase/toolbox AuthSupervisor directly with the configured secret and returns only sanitized success/error metadata.",
+			{},
+			async () => {
+				const apiKey = process.env.CLOUDBASE_API_KEY;
+				const envId = process.env.CLOUDBASE_ENV_ID;
+				if (!apiKey || !envId) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: false,
+									stage: "bindings",
+									apiKeyPresent: Boolean(apiKey),
+									envIdPresent: Boolean(envId),
+								}),
+							},
+						],
+					};
+				}
+
+				const startedAt = Date.now();
+				let timer: ReturnType<typeof setTimeout> | undefined;
+
+				try {
+					const authSupervisor = AuthSupervisor.getInstance({});
+					const outcome = await Promise.race([
+						authSupervisor
+							.loginByApiKey(apiKey, envId, { cwd: "/tmp" })
+							.then((credential: any) => ({
+								kind: "completed" as const,
+								credential,
+							})),
+						new Promise<{ kind: "timeout" }>((resolve) => {
+							timer = setTimeout(
+								() => resolve({ kind: "timeout" as const }),
+								12000,
+							);
+						}),
+					]);
+
+					if (outcome.kind === "timeout") {
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										ok: false,
+										stage: "toolbox_loginByApiKey",
+										outcome: "timeout",
+										durationMs: Date.now() - startedAt,
+										envId,
+									}),
+								},
+							],
+						};
+					}
+
+					const credential = outcome.credential ?? {};
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: true,
+									stage: "toolbox_loginByApiKey",
+									outcome: "completed",
+									durationMs: Date.now() - startedAt,
+									envId,
+									credentialShape: {
+										hasSecretId: Boolean(credential.secretId),
+										hasSecretKey: Boolean(credential.secretKey),
+										hasToken: Boolean(
+											credential.token ?? credential.sessionToken,
+										),
+										returnedEnvId:
+											typeof credential.envId === "string"
+												? credential.envId
+												: null,
+										expireAt:
+											credential.expireAt ??
+											credential.expiredTime ??
+											credential.expiration ??
+											null,
+									},
+								}),
+							},
+						],
+					};
+				} catch (error: any) {
+					const safeMeta: Record<string, unknown> = {};
+					for (const key of [
+						"code",
+						"name",
+						"status",
+						"statusCode",
+						"errno",
+						"syscall",
+						"hostname",
+						"host",
+					]) {
+						const value = error?.[key];
+						if (
+							typeof value === "string" ||
+							typeof value === "number" ||
+							typeof value === "boolean"
+						) {
+							safeMeta[key] = value;
+						}
+					}
+
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: false,
+									stage: "toolbox_loginByApiKey",
+									outcome: "error",
+									durationMs: Date.now() - startedAt,
+									envId,
+									error: {
+										message:
+											error instanceof Error
+												? error.message
+												: String(error),
+										...safeMeta,
+										stack:
+											error instanceof Error && error.stack
+												? error.stack
+														.replace(
+															/(eyJ[a-zA-Z0-9._-]{20,})/g,
+															"[redacted-token]",
+														)
+														.slice(0, 6000)
+												: null,
+									},
+								}),
+							},
+						],
+					};
+				} finally {
+					if (timer) clearTimeout(timer);
+				}
+			},
+		);
+
+		const officialCallCloudApiTool = cloudBaseServer.toolDefs.find(
+			(tool) => tool.name === "callCloudApi",
+		);
+
+		this.server.tool(
+			"cloudbaseControlPlaneProbe",
+			"Read-only bounded diagnostic for the official CloudBase control-plane call path. Calls only tcb/DescribeEnvs for the configured environment and never modifies resources.",
+			{},
+			async () => {
+				if (!officialCallCloudApiTool) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: false,
+									stage: "tool_lookup",
+									error: "Official CloudBase callCloudApi tool not found.",
+								}),
+							},
+						],
+					};
+				}
+
+				const envId = process.env.CLOUDBASE_ENV_ID;
+				if (!envId) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: false,
+									stage: "bindings",
+									error: "CLOUDBASE_ENV_ID is missing.",
+								}),
+							},
+						],
+					};
+				}
+
+				const startedAt = Date.now();
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				try {
+					const outcome = await Promise.race([
+						officialCallCloudApiTool
+							.handler({
+								service: "tcb",
+								action: "DescribeEnvs",
+								params: { EnvId: envId },
+							})
+							.then((result) => ({
+								kind: "completed" as const,
+								result,
+							})),
+						new Promise<{ kind: "timeout" }>((resolve) => {
+							timer = setTimeout(
+								() => resolve({ kind: "timeout" as const }),
+								12000,
+							);
+						}),
+					]);
+
+					if (outcome.kind === "timeout") {
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										ok: false,
+										stage: "official_callCloudApi_DescribeEnvs",
+										outcome: "timeout",
+										durationMs: Date.now() - startedAt,
+										envId,
+										note: "Official callCloudApi handler did not return within 12 seconds.",
+									}),
+								},
+							],
+						};
+					}
+
+					const raw = JSON.stringify(outcome.result);
+					const safePreview = raw
+						.replace(/"(secretId|secretKey|token|sessionToken|apiKey)"\s*:\s*"[^"]*"/gi, '"$1":"[redacted]"')
+						.slice(0, 6000);
+
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: true,
+									stage: "official_callCloudApi_DescribeEnvs",
+									outcome: "completed",
+									durationMs: Date.now() - startedAt,
+									envId,
+									resultPreview: safePreview,
+								}),
+							},
+						],
+					};
+				} catch (error) {
+					const managerDefault = (ManagerInteropModule as any).default;
+					let managerDefaultIsConstructor = false;
+					try {
+						Reflect.construct(function () {}, [], managerDefault);
+						managerDefaultIsConstructor = true;
+					} catch {
+						managerDefaultIsConstructor = false;
+					}
+
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: false,
+									stage: "official_callCloudApi_DescribeEnvs",
+									outcome: "error",
+									durationMs: Date.now() - startedAt,
+									error: {
+										message:
+											error instanceof Error
+												? error.message
+												: String(error),
+										stack:
+											error instanceof Error && error.stack
+												? error.stack
+														.replace(
+															/(eyJ[a-zA-Z0-9._-]{20,})/g,
+															"[redacted-token]",
+														)
+														.slice(0, 6000)
+												: null,
+									},
+									managerInterop: {
+										namespaceKeys: Object.keys(
+											ManagerInteropModule as any,
+										).slice(0, 20),
+										defaultType: typeof managerDefault,
+										defaultName:
+											typeof managerDefault === "function"
+												? managerDefault.name || null
+												: null,
+										defaultIsConstructor:
+											managerDefaultIsConstructor,
+										nestedDefaultType:
+											typeof managerDefault?.default,
+									},
+								}),
+							},
+						],
+					};
+				} finally {
+					if (timer) clearTimeout(timer);
+				}
+			},
+		);
+
+		for (const tool of cloudBaseServer.toolDefs) {
+			this.server.registerTool(
+				tool.name,
+				{
+					description: tool.description,
+					inputSchema: tool.inputSchema,
+				},
+				async (args) => tool.handler(args),
+			);
+		}
+	}
+}
 
 export default new OAuthProvider({
-	apiHandler,
+	apiHandler: MyMCPRestored.serve("/mcp"),
 	apiRoute: "/mcp",
 	authorizeEndpoint: "/authorize",
 	clientRegistrationEndpoint: "/register",
