@@ -1,66 +1,56 @@
-import { McpServer } from "@modelcontextprotocol/server";
-import { createMcpHandler } from "agents/mcp/server";
+import OAuthProvider from "@cloudflare/workers-oauth-provider";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpAgent } from "agents/mcp";
 import { z } from "zod";
+import { GitHubHandler } from "./github-handler";
+import type { Props } from "./utils";
 
-function createServer() {
-	const server = new McpServer({
-		name: "Authless Calculator",
+export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
+	server = new McpServer({
+		name: "CloudBase MCP OAuth Test",
 		version: "1.0.0",
 	});
 
-	server.registerTool(
-		"add",
-		{ inputSchema: z.object({ a: z.number(), b: z.number() }) },
-		async ({ a, b }) => ({
-			content: [{ type: "text", text: String(a + b) }],
-		}),
-	);
-
-	server.registerTool(
-		"calculate",
-		{
-			inputSchema: z.object({
-				operation: z.enum(["add", "subtract", "multiply", "divide"]),
-				a: z.number(),
-				b: z.number(),
+	async init() {
+		this.server.tool(
+			"ping",
+			"Verify that the authenticated ChatGPT connection can reach this private MCP server.",
+			{},
+			async () => ({
+				content: [
+					{
+						type: "text",
+						text: `pong — authenticated as GitHub user ${this.props!.login}`,
+					},
+				],
 			}),
-		},
-		async ({ operation, a, b }) => {
-			let result: number;
-			switch (operation) {
-				case "add":
-					result = a + b;
-					break;
-				case "subtract":
-					result = a - b;
-					break;
-				case "multiply":
-					result = a * b;
-					break;
-				case "divide":
-					if (b === 0)
-						return {
-							content: [
-								{
-									type: "text",
-									text: "Error: Cannot divide by zero",
-								},
-							],
-						};
-					result = a / b;
-					break;
-			}
-			return { content: [{ type: "text", text: String(result) }] };
-		},
-	);
+		);
 
-	return server;
+		this.server.tool(
+			"authenticatedUser",
+			"Return the GitHub account that authenticated this private MCP connection.",
+			{},
+			async () => ({
+				content: [
+					{
+						type: "text",
+						text: JSON.stringify({
+							login: this.props!.login,
+							name: this.props!.name,
+							email: this.props!.email,
+						}),
+					},
+				],
+			}),
+		);
+	}
 }
 
-const handler = createMcpHandler(createServer);
-
-export default {
-	fetch(request: Request, env: Env, ctx: ExecutionContext) {
-		return handler(request, env, ctx);
-	},
-} satisfies ExportedHandler<Env>;
+export default new OAuthProvider({
+	apiHandler: MyMCP.serve("/mcp"),
+	apiRoute: "/mcp",
+	authorizeEndpoint: "/authorize",
+	clientRegistrationEndpoint: "/register",
+	defaultHandler: GitHubHandler as any,
+	tokenEndpoint: "/token",
+});
