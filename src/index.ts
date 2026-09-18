@@ -136,6 +136,111 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 			lang: "zh",
 		});
 
+		const officialAuthTool = cloudBaseServer.toolDefs.find(
+			(tool) => tool.name === "auth",
+		);
+
+		this.server.tool(
+			"cloudbaseAuthProbe",
+			"Read-only diagnostic for the official CloudBase API-key authentication exchange. It uses the configured Worker secret internally and never returns credential values.",
+			{},
+			async () => {
+				if (!officialAuthTool) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: false,
+									stage: "tool_lookup",
+									error: "Official CloudBase auth tool not found.",
+								}),
+							},
+						],
+					};
+				}
+
+				const apiKey = process.env.CLOUDBASE_API_KEY;
+				const envId = process.env.CLOUDBASE_ENV_ID;
+				if (!apiKey || !envId) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: false,
+									stage: "bindings",
+									apiKeyPresent: Boolean(apiKey),
+									envIdPresent: Boolean(envId),
+								}),
+							},
+						],
+					};
+				}
+
+				const startedAt = Date.now();
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				try {
+					const outcome = await Promise.race([
+						officialAuthTool.handler({
+							action: "login_by_api_key",
+							apiKey,
+							apiKeyEnvId: envId,
+							site: process.env.TCB_SITE ?? "domestic",
+							lang: process.env.TCB_LANG ?? "zh",
+						}).then(() => ({ kind: "completed" as const })),
+						new Promise<{ kind: "timeout" }>((resolve) => {
+							timer = setTimeout(
+								() => resolve({ kind: "timeout" as const }),
+								12000,
+							);
+						}),
+					]);
+
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: outcome.kind === "completed",
+									stage: "official_auth_login_by_api_key",
+									outcome: outcome.kind,
+									durationMs: Date.now() - startedAt,
+									apiKeyPresent: true,
+									envId,
+									site: process.env.TCB_SITE ?? "domestic",
+									note:
+										outcome.kind === "completed"
+											? "Official auth handler returned within the diagnostic window."
+											: "Official auth handler did not return within 12 seconds.",
+								}),
+							},
+						],
+					};
+				} catch (error) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: false,
+									stage: "official_auth_login_by_api_key",
+									outcome: "error",
+									durationMs: Date.now() - startedAt,
+									error:
+										error instanceof Error
+											? error.message
+											: String(error),
+								}),
+							},
+						],
+					};
+				} finally {
+					if (timer) clearTimeout(timer);
+				}
+			},
+		);
+
 		for (const tool of cloudBaseServer.toolDefs) {
 			this.server.registerTool(
 				tool.name,
