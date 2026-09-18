@@ -1,6 +1,7 @@
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { createCloudBaseMcpServer } from "@cloudbase/cloudbase-mcp";
 import { AuthSupervisor } from "@cloudbase/toolbox";
+import * as ManagerInteropModule from "@cloudbase/manager-node";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
 import { GitHubHandler } from "./github-handler";
@@ -536,6 +537,15 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 						],
 					};
 				} catch (error) {
+					const managerDefault = (ManagerInteropModule as any).default;
+					let managerDefaultIsConstructor = false;
+					try {
+						Reflect.construct(function () {}, [], managerDefault);
+						managerDefaultIsConstructor = true;
+					} catch {
+						managerDefaultIsConstructor = false;
+					}
+
 					return {
 						content: [
 							{
@@ -545,10 +555,35 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 									stage: "official_callCloudApi_DescribeEnvs",
 									outcome: "error",
 									durationMs: Date.now() - startedAt,
-									error:
-										error instanceof Error
-											? error.message
-											: String(error),
+									error: {
+										message:
+											error instanceof Error
+												? error.message
+												: String(error),
+										stack:
+											error instanceof Error && error.stack
+												? error.stack
+														.replace(
+															/(eyJ[a-zA-Z0-9._-]{20,})/g,
+															"[redacted-token]",
+														)
+														.slice(0, 6000)
+												: null,
+									},
+									managerInterop: {
+										namespaceKeys: Object.keys(
+											ManagerInteropModule as any,
+										).slice(0, 20),
+										defaultType: typeof managerDefault,
+										defaultName:
+											typeof managerDefault === "function"
+												? managerDefault.name || null
+												: null,
+										defaultIsConstructor:
+											managerDefaultIsConstructor,
+										nestedDefaultType:
+											typeof managerDefault?.default,
+									},
 								}),
 							},
 						],
