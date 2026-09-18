@@ -1,4 +1,5 @@
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
+import { createCloudBaseMcpServer } from "@cloudbase/cloudbase-mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
 import { GitHubHandler } from "./github-handler";
@@ -6,11 +7,13 @@ import type { Props } from "./utils";
 
 export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 	server = new McpServer({
-		name: "CloudBase MCP OAuth Test",
+		name: "CloudBase MCP",
 		version: "1.0.0",
 	});
 
 	async init() {
+		// Keep two small diagnostics so we can distinguish OAuth/Worker issues
+		// from Tencent CloudBase authentication issues.
 		this.server.tool(
 			"ping",
 			"Verify that the authenticated ChatGPT connection can reach this private MCP server.",
@@ -42,6 +45,30 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 				],
 			}),
 		);
+
+		// Tencent's official MCP package supports CloudBase environment-level
+		// API keys via CLOUDBASE_API_KEY + CLOUDBASE_ENV_ID. Cloud mode disables
+		// actions that require a local filesystem (local uploads/downloads/builds).
+		const cloudBaseServer = await createCloudBaseMcpServer({
+			name: "Tencent CloudBase",
+			version: "2.34.4",
+			enableTelemetry: false,
+			cloudMode: true,
+			lang: "zh",
+		});
+
+		// CloudBase intentionally exposes toolDefs so external MCP hosts can
+		// re-register the official tools on their own transport/server.
+		for (const tool of cloudBaseServer.toolDefs) {
+			this.server.registerTool(
+				tool.name,
+				{
+					description: tool.description,
+					inputSchema: tool.inputSchema,
+				},
+				async (args) => tool.handler(args),
+			);
+		}
 	}
 }
 
