@@ -188,7 +188,10 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 							apiKeyEnvId: envId,
 							site: process.env.TCB_SITE ?? "domestic",
 							lang: process.env.TCB_LANG ?? "zh",
-						}).then(() => ({ kind: "completed" as const })),
+						}).then((result) => ({
+							kind: "completed" as const,
+							result,
+						})),
 						new Promise<{ kind: "timeout" }>((resolve) => {
 							timer = setTimeout(
 								() => resolve({ kind: "timeout" as const }),
@@ -197,22 +200,45 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 						}),
 					]);
 
+					if (outcome.kind === "timeout") {
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										ok: false,
+										stage: "official_auth_login_by_api_key",
+										outcome: "timeout",
+										durationMs: Date.now() - startedAt,
+										apiKeyPresent: true,
+										envId,
+										site: process.env.TCB_SITE ?? "domestic",
+										note: "Official auth handler did not return within 12 seconds.",
+									}),
+								},
+							],
+						};
+					}
+
+					const authRaw = JSON.stringify(outcome.result);
+					const authSafePreview = authRaw
+						.replace(/"(secretId|secretKey|token|sessionToken|apiKey)"\\s*:\\s*"[^"]*"/gi, '"$1":"[redacted]"')
+						.replace(/CloudBase API Key[^\\n]*/gi, "CloudBase API Key [redacted]")
+						.slice(0, 6000);
+
 					return {
 						content: [
 							{
 								type: "text",
 								text: JSON.stringify({
-									ok: outcome.kind === "completed",
+									ok: true,
 									stage: "official_auth_login_by_api_key",
-									outcome: outcome.kind,
+									outcome: "completed",
 									durationMs: Date.now() - startedAt,
 									apiKeyPresent: true,
 									envId,
 									site: process.env.TCB_SITE ?? "domestic",
-									note:
-										outcome.kind === "completed"
-											? "Official auth handler returned within the diagnostic window."
-											: "Official auth handler did not return within 12 seconds.",
+									resultPreview: authSafePreview,
 								}),
 							},
 						],
