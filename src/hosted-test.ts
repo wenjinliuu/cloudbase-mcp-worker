@@ -11,6 +11,7 @@ type TestEnv = Env & {
 const HOSTED_ORIGIN = "https://tcb-api.cloud.tencent.com";
 const HOSTED_MCP = `${HOSTED_ORIGIN}/mcp/v1`;
 const PROTOCOL_VERSION = "2025-06-18";
+const CHATGPT_CALLBACK = "https://chatgpt.com/connector/oauth/9Mi_w2UV_djV";
 
 function base64Url(bytes: Uint8Array): string {
 	let binary = "";
@@ -303,6 +304,71 @@ export class HostedMCPTest extends McpAgent<TestEnv> {
 			async () => ({
 				content: [{ type: "text", text: "pong — hosted MCP test worker" }],
 			}),
+		);
+
+		this.server.tool(
+			"registerChatGPTOAuthClient",
+			"Registers a public OAuth client with Tencent Hosted MCP for this ChatGPT connector callback. Returns only non-secret client metadata.",
+			{},
+			async () => {
+				const startedAt = Date.now();
+				try {
+					const response = await readResponse(
+						await fetch(`${HOSTED_ORIGIN}/mcp/oauth2/register`, {
+							method: "POST",
+							headers: {
+								"Content-Type": "application/json",
+								Accept: "application/json",
+							},
+							body: JSON.stringify({
+								client_name: "ChatGPT CloudBase Direct OAuth Test",
+								redirect_uris: [CHATGPT_CALLBACK],
+								grant_types: ["authorization_code", "refresh_token"],
+								response_types: ["code"],
+								token_endpoint_auth_method: "none",
+							}),
+						}),
+					);
+
+					const clientId = response.json?.client_id;
+					if (response.status !== 201 || !clientId) {
+						throw new Error(
+							`Hosted OAuth client registration failed: ${response.status} ${sanitizedSnippet(response.text)}`,
+						);
+					}
+
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: true,
+									stage: "chatgpt_oauth_client_register",
+									durationMs: Date.now() - startedAt,
+									clientId,
+									redirectUri: CHATGPT_CALLBACK,
+									tokenEndpointAuthMethod: "none",
+									hasClientSecret: Boolean(response.json?.client_secret),
+								}),
+							},
+						],
+					};
+				} catch (error) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: false,
+									stage: "chatgpt_oauth_client_register",
+									durationMs: Date.now() - startedAt,
+									error: safeError(error),
+								}),
+							},
+						],
+					};
+				}
+			},
 		);
 
 		this.server.tool(
