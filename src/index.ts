@@ -1,5 +1,6 @@
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { createCloudBaseMcpServer } from "@cloudbase/cloudbase-mcp";
+import { AuthSupervisor } from "@cloudbase/toolbox";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
 import { GitHubHandler } from "./github-handler";
@@ -271,6 +272,146 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 										error instanceof Error
 											? error.message
 											: String(error),
+								}),
+							},
+						],
+					};
+				} finally {
+					if (timer) clearTimeout(timer);
+				}
+			},
+		);
+
+		this.server.tool(
+			"cloudbaseApiKeyExchangeProbe",
+			"Read-only low-level diagnostic for CloudBase API-key exchange. Calls @cloudbase/toolbox AuthSupervisor directly with the configured secret and returns only sanitized success/error metadata.",
+			{},
+			async () => {
+				const apiKey = process.env.CLOUDBASE_API_KEY;
+				const envId = process.env.CLOUDBASE_ENV_ID;
+				if (!apiKey || !envId) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: false,
+									stage: "bindings",
+									apiKeyPresent: Boolean(apiKey),
+									envIdPresent: Boolean(envId),
+								}),
+							},
+						],
+					};
+				}
+
+				const startedAt = Date.now();
+				let timer: ReturnType<typeof setTimeout> | undefined;
+
+				try {
+					const authSupervisor = AuthSupervisor.getInstance({});
+					const outcome = await Promise.race([
+						authSupervisor
+							.loginByApiKey(apiKey, envId, { cwd: "/" })
+							.then((credential: any) => ({
+								kind: "completed" as const,
+								credential,
+							})),
+						new Promise<{ kind: "timeout" }>((resolve) => {
+							timer = setTimeout(
+								() => resolve({ kind: "timeout" as const }),
+								12000,
+							);
+						}),
+					]);
+
+					if (outcome.kind === "timeout") {
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										ok: false,
+										stage: "toolbox_loginByApiKey",
+										outcome: "timeout",
+										durationMs: Date.now() - startedAt,
+										envId,
+									}),
+								},
+							],
+						};
+					}
+
+					const credential = outcome.credential ?? {};
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: true,
+									stage: "toolbox_loginByApiKey",
+									outcome: "completed",
+									durationMs: Date.now() - startedAt,
+									envId,
+									credentialShape: {
+										hasSecretId: Boolean(credential.secretId),
+										hasSecretKey: Boolean(credential.secretKey),
+										hasToken: Boolean(
+											credential.token ?? credential.sessionToken,
+										),
+										returnedEnvId:
+											typeof credential.envId === "string"
+												? credential.envId
+												: null,
+										expireAt:
+											credential.expireAt ??
+											credential.expiredTime ??
+											credential.expiration ??
+											null,
+									},
+								}),
+							},
+						],
+					};
+				} catch (error: any) {
+					const safeMeta: Record<string, unknown> = {};
+					for (const key of [
+						"code",
+						"name",
+						"status",
+						"statusCode",
+						"errno",
+						"syscall",
+						"hostname",
+						"host",
+					]) {
+						const value = error?.[key];
+						if (
+							typeof value === "string" ||
+							typeof value === "number" ||
+							typeof value === "boolean"
+						) {
+							safeMeta[key] = value;
+						}
+					}
+
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: false,
+									stage: "toolbox_loginByApiKey",
+									outcome: "error",
+									durationMs: Date.now() - startedAt,
+									envId,
+									error: {
+										message:
+											error instanceof Error
+												? error.message
+												: String(error),
+										...safeMeta,
+									},
 								}),
 							},
 						],
