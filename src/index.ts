@@ -1,4 +1,3 @@
-import "./node-fs-compat";
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { createCloudBaseMcpServer } from "@cloudbase/cloudbase-mcp";
 import { AuthSupervisor } from "@cloudbase/toolbox";
@@ -412,6 +411,15 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 												? error.message
 												: String(error),
 										...safeMeta,
+										stack:
+											error instanceof Error && error.stack
+												? error.stack
+														.replace(
+															/(eyJ[a-zA-Z0-9._-]{20,})/g,
+															"[redacted-token]",
+														)
+														.slice(0, 6000)
+												: null,
 									},
 								}),
 							},
