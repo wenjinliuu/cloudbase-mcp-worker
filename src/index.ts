@@ -241,6 +241,130 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 			},
 		);
 
+		const officialCallCloudApiTool = cloudBaseServer.toolDefs.find(
+			(tool) => tool.name === "callCloudApi",
+		);
+
+		this.server.tool(
+			"cloudbaseControlPlaneProbe",
+			"Read-only bounded diagnostic for the official CloudBase control-plane call path. Calls only tcb/DescribeEnvs for the configured environment and never modifies resources.",
+			{},
+			async () => {
+				if (!officialCallCloudApiTool) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: false,
+									stage: "tool_lookup",
+									error: "Official CloudBase callCloudApi tool not found.",
+								}),
+							},
+						],
+					};
+				}
+
+				const envId = process.env.CLOUDBASE_ENV_ID;
+				if (!envId) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: false,
+									stage: "bindings",
+									error: "CLOUDBASE_ENV_ID is missing.",
+								}),
+							},
+						],
+					};
+				}
+
+				const startedAt = Date.now();
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				try {
+					const outcome = await Promise.race([
+						officialCallCloudApiTool
+							.handler({
+								service: "tcb",
+								action: "DescribeEnvs",
+								params: { EnvId: envId },
+							})
+							.then((result) => ({
+								kind: "completed" as const,
+								result,
+							})),
+						new Promise<{ kind: "timeout" }>((resolve) => {
+							timer = setTimeout(
+								() => resolve({ kind: "timeout" as const }),
+								12000,
+							);
+						}),
+					]);
+
+					if (outcome.kind === "timeout") {
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										ok: false,
+										stage: "official_callCloudApi_DescribeEnvs",
+										outcome: "timeout",
+										durationMs: Date.now() - startedAt,
+										envId,
+										note: "Official callCloudApi handler did not return within 12 seconds.",
+									}),
+								},
+							],
+						};
+					}
+
+					const raw = JSON.stringify(outcome.result);
+					const safePreview = raw
+						.replace(/"(secretId|secretKey|token|sessionToken|apiKey)"\s*:\s*"[^"]*"/gi, '"$1":"[redacted]"')
+						.slice(0, 6000);
+
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: true,
+									stage: "official_callCloudApi_DescribeEnvs",
+									outcome: "completed",
+									durationMs: Date.now() - startedAt,
+									envId,
+									resultPreview: safePreview,
+								}),
+							},
+						],
+					};
+				} catch (error) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: false,
+									stage: "official_callCloudApi_DescribeEnvs",
+									outcome: "error",
+									durationMs: Date.now() - startedAt,
+									error:
+										error instanceof Error
+											? error.message
+											: String(error),
+								}),
+							},
+						],
+					};
+				} finally {
+					if (timer) clearTimeout(timer);
+				}
+			},
+		);
+
 		for (const tool of cloudBaseServer.toolDefs) {
 			this.server.registerTool(
 				tool.name,
