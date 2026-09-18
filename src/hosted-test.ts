@@ -8,19 +8,225 @@ type TestEnv = Env & {
 	CLOUDBASE_ENV_ID?: string;
 };
 
-const HOSTED_MCP = "https://tcb-api.cloud.tencent.com/mcp/v1";
+const HOSTED_ORIGIN = "https://tcb-api.cloud.tencent.com";
+const HOSTED_MCP = `${HOSTED_ORIGIN}/mcp/v1`;
 const PROTOCOL_VERSION = "2025-06-18";
+
+function base64Url(bytes: Uint8Array): string {
+	let binary = "";
+	for (const byte of bytes) binary += String.fromCharCode(byte);
+	return btoa(binary)
+		.replace(/\+/g, "-")
+		.replace(/\//g, "_")
+		.replace(/=+$/g, "");
+}
+
+async function createPkcePair() {
+	const verifierBytes = crypto.getRandomValues(new Uint8Array(32));
+	const verifier = base64Url(verifierBytes);
+	const digest = await crypto.subtle.digest(
+		"SHA-256",
+		new TextEncoder().encode(verifier),
+	);
+	return {
+		verifier,
+		challenge: base64Url(new Uint8Array(digest)),
+	};
+}
+
+async function readResponse(response: Response) {
+	const text = await response.text();
+	let json: any = null;
+	try {
+		json = JSON.parse(text);
+	} catch {
+		// Keep non-JSON body as text only.
+	}
+	return {
+		status: response.status,
+		text,
+		json,
+		location: response.headers.get("location"),
+	};
+}
+
+function sanitizedSnippet(value: string): string {
+	return value
+		.replace(
+			/"(secretId|secretKey|token|sessionToken|apiKey|api_key|access_token|refresh_token)"\s*:\s*"[^"]*"/gi,
+			'"$1":"[redacted]"',
+		)
+		.replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [redacted]")
+		.replace(/eyJ[A-Za-z0-9._~-]{20,}/g, "[redacted-token]")
+		.slice(0, 3000);
+}
+
+async function getHostedAccessToken(
+	env: TestEnv,
+): Promise<{ accessToken: string; stageDurations: Record<string, number> }> {
+	const apiKey = env.CLOUDBASE_API_KEY;
+	const envId = env.CLOUDBASE_ENV_ID;
+	if (!apiKey || !envId) {
+		throw new Error("Missing CLOUDBASE_API_KEY or CLOUDBASE_ENV_ID.");
+	}
+
+	const durations: Record<string, number> = {};
+	const pkce = await createPkcePair();
+	const redirectUri = "http://127.0.0.1:8765/callback";
+
+	let startedAt = Date.now();
+	const register = await readResponse(
+		await fetch(`${HOSTED_ORIGIN}/mcp/oauth2/register`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Accept: "application/json",
+			},
+			body: JSON.stringify({
+				client_name: "cloudbase-hosted-worker-test",
+				redirect_uris: [redirectUri],
+				grant_types: ["authorization_code", "refresh_token"],
+				response_types: ["code"],
+				token_endpoint_auth_method: "none",
+			}),
+		}),
+	);
+	durations.registerMs = Date.now() - startedAt;
+
+	const clientId = register.json?.client_id;
+	if (register.status !== 201 || !clientId) {
+		throw new Error(
+			`Hosted OAuth register failed: ${register.status} ${sanitizedSnippet(register.text)}`,
+		);
+	}
+
+	startedAt = Date.now();
+	const authorizeUrl = new URL(`${HOSTED_ORIGIN}/mcp/oauth2/authorize`);
+	authorizeUrl.search = new URLSearchParams({
+		response_type: "code",
+		client_id: clientId,
+		redirect_uri: redirectUri,
+		code_challenge: pkce.challenge,
+		code_challenge_method: "S256",
+		scope: "mcp:full",
+		state: "worker-test",
+	}).toString();
+
+	const authorize = await readResponse(
+		await fetch(authorizeUrl.toString(), {
+			method: "GET",
+			redirect: "manual",
+		}),
+	);
+	durations.authorizeMs = Date.now() - startedAt;
+
+	const authorizeLocation = authorize.location;
+	if (!authorizeLocation) {
+		throw new Error(
+			`Hosted OAuth authorize missing Location: ${authorize.status} ${sanitizedSnippet(authorize.text)}`,
+		);
+	}
+
+	const sessionId = new URL(authorizeLocation).searchParams.get("session_id");
+	if (!sessionId) {
+		throw new Error(
+			`Hosted OAuth authorize missing session_id: ${sanitizedSnippet(authorizeLocation)}`,
+		);
+	}
+
+	startedAt = Date.now();
+	const verify = await readResponse(
+		await fetch(`${HOSTED_ORIGIN}/mcp/oauth2/authorize/apikey`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Accept: "application/json",
+			},
+			body: JSON.stringify({
+				session_id: sessionId,
+				env_id: envId,
+				api_key: apiKey,
+			}),
+		}),
+	);
+	durations.apiKeyVerifyMs = Date.now() - startedAt;
+
+	if (verify.status !== 200 && verify.status !== 201) {
+		throw new Error(
+			`Hosted OAuth API-key verify failed: ${verify.status} ${sanitizedSnippet(verify.text)}`,
+		);
+	}
+
+	startedAt = Date.now();
+	const consent = await readResponse(
+		await fetch(`${HOSTED_ORIGIN}/mcp/oauth2/authorize/consent`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Accept: "application/json",
+			},
+			body: JSON.stringify({
+				session_id: sessionId,
+				env_id: envId,
+			}),
+			redirect: "manual",
+		}),
+	);
+	durations.consentMs = Date.now() - startedAt;
+
+	let code: string | null = consent.json?.code ?? null;
+	if (!code && consent.location) {
+		try {
+			code = new URL(consent.location).searchParams.get("code");
+		} catch {
+			// Fall through to structured error below.
+		}
+	}
+	if (!code) {
+		throw new Error(
+			`Hosted OAuth consent missing code: ${consent.status} ${sanitizedSnippet(consent.text)}`,
+		);
+	}
+
+	startedAt = Date.now();
+	const tokenResponse = await readResponse(
+		await fetch(`${HOSTED_ORIGIN}/mcp/oauth2/token`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/x-www-form-urlencoded",
+				Accept: "application/json",
+			},
+			body: new URLSearchParams({
+				grant_type: "authorization_code",
+				code,
+				client_id: clientId,
+				redirect_uri: redirectUri,
+				code_verifier: pkce.verifier,
+			}).toString(),
+		}),
+	);
+	durations.tokenMs = Date.now() - startedAt;
+
+	const accessToken = tokenResponse.json?.access_token;
+	if (tokenResponse.status !== 200 || !accessToken) {
+		throw new Error(
+			`Hosted OAuth token exchange failed: ${tokenResponse.status} ${sanitizedSnippet(tokenResponse.text)}`,
+		);
+	}
+
+	return { accessToken, stageDurations: durations };
+}
 
 async function withHostedClient<T>(
 	env: TestEnv,
 	fn: (client: Client) => Promise<T>,
-): Promise<T> {
-	const apiKey = env.CLOUDBASE_API_KEY;
+): Promise<{ result: T; authDurations: Record<string, number> }> {
 	const envId = env.CLOUDBASE_ENV_ID;
-
-	if (!apiKey || !envId) {
-		throw new Error("Missing CLOUDBASE_API_KEY or CLOUDBASE_ENV_ID.");
+	if (!envId) {
+		throw new Error("Missing CLOUDBASE_ENV_ID.");
 	}
+
+	const { accessToken, stageDurations } = await getHostedAccessToken(env);
 
 	const url = new URL(HOSTED_MCP);
 	url.searchParams.set("env_id", envId);
@@ -28,7 +234,7 @@ async function withHostedClient<T>(
 	const transport = new StreamableHTTPClientTransport(url, {
 		requestInit: {
 			headers: {
-				Authorization: `Bearer ${apiKey}`,
+				Authorization: `Bearer ${accessToken}`,
 			},
 		},
 	});
@@ -52,7 +258,10 @@ async function withHostedClient<T>(
 
 	try {
 		await client.connect(transport);
-		return await fn(client);
+		return {
+			result: await fn(client),
+			authDurations: stageDurations,
+		};
 	} finally {
 		try {
 			await client.close();
@@ -69,19 +278,21 @@ async function withHostedClient<T>(
 
 function safeError(error: unknown) {
 	if (!(error instanceof Error)) {
-		return { message: String(error) };
+		return { message: sanitizedSnippet(String(error)) };
 	}
 	return {
 		name: error.name,
-		message: error.message,
-		stack: error.stack?.slice(0, 4000) ?? null,
+		message: sanitizedSnippet(error.message),
+		stack: error.stack
+			? sanitizedSnippet(error.stack).slice(0, 4000)
+			: null,
 	};
 }
 
 export class HostedMCPTest extends McpAgent<TestEnv> {
 	server = new McpServer({
 		name: "CloudBase Hosted MCP Test",
-		version: "1.0.0",
+		version: "1.1.0",
 	});
 
 	async init() {
@@ -96,18 +307,21 @@ export class HostedMCPTest extends McpAgent<TestEnv> {
 
 		this.server.tool(
 			"hostedToolsProbe",
-			"Read-only diagnostic. Connects to Tencent CloudBase Hosted MCP with the configured environment-scoped API key and returns only tool names/count.",
+			"Read-only diagnostic. Uses the configured CloudBase API Key only to complete Tencent Hosted MCP OAuth, then returns the official Hosted MCP tool names/count.",
 			{},
 			async () => {
 				const startedAt = Date.now();
 				try {
-					const result = await withHostedClient(this.env, async (client) => {
-						const listed = await client.listTools();
-						return {
-							count: listed.tools.length,
-							names: listed.tools.map((tool) => tool.name),
-						};
-					});
+					const { result, authDurations } = await withHostedClient(
+						this.env,
+						async (client) => {
+							const listed = await client.listTools();
+							return {
+								count: listed.tools.length,
+								names: listed.tools.map((tool) => tool.name),
+							};
+						},
+					);
 
 					return {
 						content: [
@@ -115,8 +329,9 @@ export class HostedMCPTest extends McpAgent<TestEnv> {
 								type: "text",
 								text: JSON.stringify({
 									ok: true,
-									stage: "hosted_tools_list",
+									stage: "hosted_tools_list_via_oauth",
 									durationMs: Date.now() - startedAt,
+									authDurations,
 									envId: this.env.CLOUDBASE_ENV_ID ?? null,
 									...result,
 								}),
@@ -130,7 +345,7 @@ export class HostedMCPTest extends McpAgent<TestEnv> {
 								type: "text",
 								text: JSON.stringify({
 									ok: false,
-									stage: "hosted_tools_list",
+									stage: "hosted_tools_list_via_oauth",
 									durationMs: Date.now() - startedAt,
 									envId: this.env.CLOUDBASE_ENV_ID ?? null,
 									error: safeError(error),
@@ -144,28 +359,27 @@ export class HostedMCPTest extends McpAgent<TestEnv> {
 
 		this.server.tool(
 			"hostedQueryEnvProbe",
-			"Read-only diagnostic. Calls only the official CloudBase Hosted MCP queryEnv tool with action=info for the configured environment.",
+			"Read-only diagnostic. Uses Tencent Hosted MCP OAuth and calls only queryEnv(action=info) for the configured environment.",
 			{},
 			async () => {
 				const startedAt = Date.now();
 				try {
-					const result = await withHostedClient(this.env, async (client) => {
-						return await client.callTool({
-							name: "queryEnv",
-							arguments: {
-								action: "info",
-								envId: this.env.CLOUDBASE_ENV_ID,
-							},
-						});
-					});
+					const { result, authDurations } = await withHostedClient(
+						this.env,
+						async (client) =>
+							await client.callTool({
+								name: "queryEnv",
+								arguments: {
+									action: "info",
+									envId: this.env.CLOUDBASE_ENV_ID,
+								},
+							}),
+					);
 
-					const raw = JSON.stringify(result);
-					const safePreview = raw
-						.replace(
-							/"(secretId|secretKey|token|sessionToken|apiKey)"\s*:\s*"[^"]*"/gi,
-							'"$1":"[redacted]"',
-						)
-						.slice(0, 8000);
+					const safePreview = sanitizedSnippet(JSON.stringify(result)).slice(
+						0,
+						8000,
+					);
 
 					return {
 						content: [
@@ -173,8 +387,9 @@ export class HostedMCPTest extends McpAgent<TestEnv> {
 								type: "text",
 								text: JSON.stringify({
 									ok: true,
-									stage: "hosted_queryEnv_info",
+									stage: "hosted_queryEnv_info_via_oauth",
 									durationMs: Date.now() - startedAt,
+									authDurations,
 									envId: this.env.CLOUDBASE_ENV_ID ?? null,
 									resultPreview: safePreview,
 								}),
@@ -188,7 +403,7 @@ export class HostedMCPTest extends McpAgent<TestEnv> {
 								type: "text",
 								text: JSON.stringify({
 									ok: false,
-									stage: "hosted_queryEnv_info",
+									stage: "hosted_queryEnv_info_via_oauth",
 									durationMs: Date.now() - startedAt,
 									envId: this.env.CLOUDBASE_ENV_ID ?? null,
 									error: safeError(error),
