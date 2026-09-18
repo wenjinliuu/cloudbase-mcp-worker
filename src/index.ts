@@ -1,3 +1,4 @@
+import "./node-fs-compat";
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { createCloudBaseMcpServer } from "@cloudbase/cloudbase-mcp";
 import { AuthSupervisor } from "@cloudbase/toolbox";
