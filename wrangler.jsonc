@@ -10,6 +10,10 @@
 	"compatibility_date": "2026-09-18",
 	"compatibility_flags": ["nodejs_compat"],
 	"keep_vars": true,
+	"define": {
+		"__dirname": ""/"",
+		"__filename": ""/worker.js""
+	},
 	"alias": {
 		"@aws-sdk/client-s3": "./src/aws-s3-stub.ts"
 	},
