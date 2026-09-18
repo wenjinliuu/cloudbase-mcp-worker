@@ -1,16 +1,25 @@
 /**
  * CloudBase MCP Worker
- * GitHub OAuth protects /mcp. OAuth state is stored in Cloudflare KV.
+ * ChatGPT -> GitHub OAuth -> Cloudflare Worker -> Tencent CloudBase
+ * CloudBase uses an environment-scoped API key, not account-level SecretId/SecretKey.
  */
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "cloudbase-mcp-worker",
 	"main": "src/index.ts",
-	"compatibility_date": "2026-07-02",
-	"compatibility_flags": ["nodejs_compat"],
+	"compatibility_date": "2026-09-19",
 	"keep_vars": true,
+	"vars": {
+		"CLOUDBASE_ENV_ID": "wenjin-cloudbase-d1empq882391ac1",
+		"TCB_SITE": "domestic",
+		"TCB_LANG": "zh"
+	},
 	"secrets": {
-		"required": ["GITHUB_CLIENT_SECRET", "COOKIE_ENCRYPTION_KEY"]
+		"required": [
+			"GITHUB_CLIENT_SECRET",
+			"COOKIE_ENCRYPTION_KEY",
+			"CLOUDBASE_API_KEY"
+		]
 	},
 	"migrations": [
 		{
