@@ -1,0 +1,27 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "cloudbase-hosted-oauth-staging",
+	"main": "src/hosted-oauth-staging.ts",
+	"compatibility_date": "2026-09-18",
+	"compatibility_flags": ["nodejs_compat"],
+	"keep_vars": true,
+	"vars": {
+		"CLOUDBASE_ENV_ID": "wenjin-cloudbase-d1empq882391ac1"
+	},
+	"secrets": {
+		"required": [
+			"GITHUB_CLIENT_SECRET",
+			"COOKIE_ENCRYPTION_KEY",
+			"CLOUDBASE_API_KEY"
+		]
+	},
+	"kv_namespaces": [
+		{
+			"binding": "OAUTH_KV",
+			"id": "bd19f849e53b4a94936dd59c8a07369d"
+		}
+	],
+	"observability": {
+		"enabled": true
+	}
+}
