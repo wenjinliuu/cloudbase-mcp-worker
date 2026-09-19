@@ -175,6 +175,7 @@ const directDefaultHandler = {
 				ok: true,
 				variant: "cloudbase-mcp-direct-v2",
 				cloudBaseMcpVersion: CLOUDBASE_MCP_VERSION,
+				credentialMode: "stateless-api-key",
 			});
 		}
 
