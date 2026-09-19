@@ -111,11 +111,25 @@ const directMcp = {
 	},
 } satisfies ExportedHandler<DirectV2WorkerEnv>;
 
+const directDefaultHandler = {
+	async fetch(request, env, ctx) {
+		if (new URL(request.url).pathname === "/health") {
+			return Response.json({
+				ok: true,
+				variant: "cloudbase-mcp-direct-v2",
+				cloudBaseMcpVersion: CLOUDBASE_MCP_VERSION,
+			});
+		}
+
+		return GitHubHandler.fetch(request, env, ctx);
+	},
+} satisfies ExportedHandler<DirectV2WorkerEnv>;
+
 export default new OAuthProvider({
 	apiHandler: directMcp,
 	apiRoute: "/mcp",
 	authorizeEndpoint: "/authorize",
 	clientRegistrationEndpoint: "/register",
-	defaultHandler: GitHubHandler as any,
+	defaultHandler: directDefaultHandler,
 	tokenEndpoint: "/token",
 });

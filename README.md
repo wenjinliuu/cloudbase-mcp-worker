@@ -95,6 +95,12 @@ Point ChatGPT at:
 https://<direct-v2-worker-hostname>/mcp
 ```
 
+Before connecting ChatGPT, verify that the Worker module starts successfully:
+
+```text
+https://<direct-v2-worker-hostname>/health
+```
+
 ## Security boundaries
 
 - GitHub OAuth requests only the `read:user` scope.
