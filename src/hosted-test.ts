@@ -12,6 +12,11 @@ const HOSTED_ORIGIN = "https://tcb-api.cloud.tencent.com";
 const HOSTED_MCP = `${HOSTED_ORIGIN}/mcp/v1`;
 const PROTOCOL_VERSION = "2025-06-18";
 const CHATGPT_CALLBACK = "https://chatgpt.com/connector/oauth/9Mi_w2UV_djV";
+const READ_ONLY_MIRROR_TOOLS = new Set([
+	"queryEnv",
+	"queryFunctions",
+	"queryPgDatabase",
+]);
 
 let cachedHostedToken: { token: string; expiresAt: number } | null = null;
 
@@ -436,6 +441,56 @@ async function proxyReadOnlyMcp(request: Request, env: TestEnv): Promise<Respons
 	});
 }
 
+
+async function withCachedHostedClient<T>(
+	env: TestEnv,
+	fn: (client: Client) => Promise<T>,
+): Promise<T> {
+	const envId = env.CLOUDBASE_ENV_ID;
+	if (!envId) throw new Error("Missing CLOUDBASE_ENV_ID.");
+
+	const accessToken = await getCachedHostedToken(env);
+	const url = new URL(HOSTED_MCP);
+	url.searchParams.set("env_id", envId);
+
+	const transport = new StreamableHTTPClientTransport(url, {
+		requestInit: {
+			headers: {
+				Authorization: `Bearer ${accessToken}`,
+			},
+		},
+	});
+
+	const originalSend = transport.send.bind(transport);
+	transport.send = async (message: any) => {
+		if (
+			message?.method === "initialize" &&
+			message?.params &&
+			typeof message.params === "object"
+		) {
+			message.params.protocolVersion = PROTOCOL_VERSION;
+		}
+		return originalSend(message);
+	};
+
+	const client = new Client(
+		{ name: "cloudbase-hosted-mcp-mirror-test", version: "1.0.0" },
+		{ capabilities: {} },
+	);
+
+	try {
+		await client.connect(transport);
+		return await fn(client);
+	} finally {
+		try {
+			await client.close();
+		} catch {}
+		try {
+			await transport.close();
+		} catch {}
+	}
+}
+
 function safeError(error: unknown) {
 	if (!(error instanceof Error)) {
 		return { message: sanitizedSnippet(String(error)) };
@@ -639,6 +694,43 @@ export class HostedMCPTest extends McpAgent<TestEnv> {
 				}
 			},
 		);
+
+		// Mirror a deliberately small, read-only subset of Tencent Hosted MCP
+		// using the official tool schemas. This validates the final architecture
+		// without exposing any write-capable CloudBase tools from this temporary
+		// unauthenticated test Worker.
+		try {
+			const hostedTools = await withCachedHostedClient(
+				this.env,
+				async (client) => (await client.listTools()).tools,
+			);
+
+			for (const tool of hostedTools) {
+				if (!READ_ONLY_MIRROR_TOOLS.has(tool.name)) continue;
+
+				this.server.registerTool(
+					tool.name,
+					{
+						description:
+							tool.description ??
+							`Read-only CloudBase Hosted MCP mirror: ${tool.name}`,
+						inputSchema: tool.inputSchema as any,
+					},
+					async (args: any) =>
+						await withCachedHostedClient(this.env, async (client) => {
+							return (await client.callTool({
+								name: tool.name,
+								arguments: args ?? {},
+							})) as any;
+						}),
+				);
+			}
+		} catch (error) {
+			console.error(
+				"Failed to register read-only Hosted MCP mirror tools:",
+				error instanceof Error ? error.message : String(error),
+			);
+		}
 	}
 }
 
