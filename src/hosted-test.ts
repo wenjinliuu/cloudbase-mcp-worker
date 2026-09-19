@@ -13,6 +13,8 @@ const HOSTED_MCP = `${HOSTED_ORIGIN}/mcp/v1`;
 const PROTOCOL_VERSION = "2025-06-18";
 const CHATGPT_CALLBACK = "https://chatgpt.com/connector/oauth/9Mi_w2UV_djV";
 
+let cachedHostedToken: { token: string; expiresAt: number } | null = null;
+
 function base64Url(bytes: Uint8Array): string {
 	let binary = "";
 	for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -277,6 +279,163 @@ async function withHostedClient<T>(
 	}
 }
 
+
+async function getCachedHostedToken(env: TestEnv): Promise<string> {
+	if (
+		cachedHostedToken &&
+		cachedHostedToken.expiresAt > Date.now() + 30_000
+	) {
+		return cachedHostedToken.token;
+	}
+
+	const { accessToken } = await getHostedAccessToken(env);
+	cachedHostedToken = {
+		token: accessToken,
+		// Conservative cache lifetime for the diagnostic proxy. A fresh token is
+		// fetched automatically after this point.
+		expiresAt: Date.now() + 5 * 60_000,
+	};
+	return accessToken;
+}
+
+function jsonRpcError(id: unknown, code: number, message: string): Response {
+	return new Response(
+		JSON.stringify({
+			jsonrpc: "2.0",
+			id: id ?? null,
+			error: { code, message },
+		}),
+		{
+			status: 200,
+			headers: { "Content-Type": "application/json" },
+		},
+	);
+}
+
+async function proxyReadOnlyMcp(request: Request, env: TestEnv): Promise<Response> {
+	const envId = env.CLOUDBASE_ENV_ID;
+	if (!envId) {
+		return new Response("Missing CLOUDBASE_ENV_ID", { status: 500 });
+	}
+
+	const upstream = new URL(HOSTED_MCP);
+	upstream.searchParams.set("env_id", envId);
+
+	const headers = new Headers(request.headers);
+	headers.set("Authorization", `Bearer ${await getCachedHostedToken(env)}`);
+	headers.delete("host");
+	headers.delete("content-length");
+	headers.delete("cookie");
+	for (const h of [
+		"cf-connecting-ip",
+		"cf-ipcountry",
+		"cf-ray",
+		"cf-visitor",
+		"x-forwarded-for",
+		"x-forwarded-proto",
+		"x-real-ip",
+	]) {
+		headers.delete(h);
+	}
+
+	let body: BodyInit | null | undefined = request.body;
+	let requestMessage: any = null;
+
+	if (
+		request.method === "POST" &&
+		(request.headers.get("content-type") ?? "")
+			.toLowerCase()
+			.includes("application/json")
+	) {
+		const raw = await request.text();
+		try {
+			requestMessage = JSON.parse(raw);
+		} catch {
+			return jsonRpcError(null, -32700, "Invalid JSON");
+		}
+
+		if (
+			requestMessage?.method === "initialize" &&
+			requestMessage?.params &&
+			typeof requestMessage.params === "object"
+		) {
+			requestMessage.params.protocolVersion = PROTOCOL_VERSION;
+		}
+
+		if (requestMessage?.method === "tools/call") {
+			const toolName = requestMessage?.params?.name;
+			const args = requestMessage?.params?.arguments ?? {};
+			const allowed =
+				toolName === "queryEnv" &&
+				args?.action === "info" &&
+				(!args?.envId || args.envId === envId);
+
+			if (!allowed) {
+				return jsonRpcError(
+					requestMessage?.id,
+					-32601,
+					"Read-only test proxy only allows queryEnv(action=info) for the configured environment.",
+				);
+			}
+			requestMessage.params.arguments = { ...args, envId };
+		}
+
+		body = JSON.stringify(requestMessage);
+		headers.set("Content-Type", "application/json");
+	}
+
+	if (headers.has("MCP-Protocol-Version")) {
+		headers.set("MCP-Protocol-Version", PROTOCOL_VERSION);
+	}
+
+	const upstreamResponse = await fetch(upstream.toString(), {
+		method: request.method,
+		headers,
+		body:
+			request.method === "GET" || request.method === "HEAD"
+				? undefined
+				: body,
+		redirect: "manual",
+	});
+
+	const responseHeaders = new Headers(upstreamResponse.headers);
+
+	// For tools/list, expose only queryEnv so this temporary public diagnostic
+	// endpoint cannot advertise write-capable CloudBase tools.
+	if (
+		requestMessage?.method === "tools/list" &&
+		(upstreamResponse.headers.get("content-type") ?? "")
+			.toLowerCase()
+			.includes("application/json")
+	) {
+		const text = await upstreamResponse.text();
+		try {
+			const payload = JSON.parse(text);
+			if (Array.isArray(payload?.result?.tools)) {
+				payload.result.tools = payload.result.tools.filter(
+					(tool: any) => tool?.name === "queryEnv",
+				);
+			}
+			responseHeaders.set("Content-Type", "application/json");
+			responseHeaders.delete("content-length");
+			return new Response(JSON.stringify(payload), {
+				status: upstreamResponse.status,
+				headers: responseHeaders,
+			});
+		} catch {
+			return new Response(text, {
+				status: upstreamResponse.status,
+				headers: responseHeaders,
+			});
+		}
+	}
+
+	return new Response(upstreamResponse.body, {
+		status: upstreamResponse.status,
+		headers: responseHeaders,
+	});
+}
+
 function safeError(error: unknown) {
 	if (!(error instanceof Error)) {
 		return { message: sanitizedSnippet(String(error)) };
@@ -483,4 +642,23 @@ export class HostedMCPTest extends McpAgent<TestEnv> {
 	}
 }
 
-export default HostedMCPTest.serve("/mcp");
+const diagnosticHandler = HostedMCPTest.serve("/mcp");
+
+export default {
+	async fetch(request: Request, env: TestEnv, ctx: ExecutionContext) {
+		const url = new URL(request.url);
+		if (url.pathname === "/raw-mcp") {
+			try {
+				return await proxyReadOnlyMcp(request, env);
+			} catch (error) {
+				console.error(
+					"raw-mcp proxy error:",
+					error instanceof Error ? error.message : String(error),
+				);
+				return new Response("Hosted MCP proxy failed", { status: 502 });
+			}
+		}
+
+		return (diagnosticHandler as any).fetch(request, env, ctx);
+	},
+};
