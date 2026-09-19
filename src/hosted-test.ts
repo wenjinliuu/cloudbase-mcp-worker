@@ -648,15 +648,10 @@ export default {
 	async fetch(request: Request, env: TestEnv, ctx: ExecutionContext) {
 		const url = new URL(request.url);
 		if (url.pathname === "/raw-mcp") {
-			try {
-				return await proxyReadOnlyMcp(request, env);
-			} catch (error) {
-				console.error(
-					"raw-mcp proxy error:",
-					error instanceof Error ? error.message : String(error),
-				);
-				return new Response("Hosted MCP proxy failed", { status: 502 });
-			}
+			return new Response(
+				"Temporary raw MCP diagnostic endpoint disabled after successful verification.",
+				{ status: 410 },
+			);
 		}
 
 		return (diagnosticHandler as any).fetch(request, env, ctx);
