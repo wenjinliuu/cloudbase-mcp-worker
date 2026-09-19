@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
+import { z } from "zod";
 
 type TestEnv = Env & {
 	CLOUDBASE_API_KEY?: string;
@@ -12,11 +13,6 @@ const HOSTED_ORIGIN = "https://tcb-api.cloud.tencent.com";
 const HOSTED_MCP = `${HOSTED_ORIGIN}/mcp/v1`;
 const PROTOCOL_VERSION = "2025-06-18";
 const CHATGPT_CALLBACK = "https://chatgpt.com/connector/oauth/9Mi_w2UV_djV";
-const READ_ONLY_MIRROR_TOOLS = new Set([
-	"queryEnv",
-	"queryFunctions",
-	"queryPgDatabase",
-]);
 
 let cachedHostedToken: { token: string; expiresAt: number } | null = null;
 
@@ -695,42 +691,85 @@ export class HostedMCPTest extends McpAgent<TestEnv> {
 			},
 		);
 
-		// Mirror a deliberately small, read-only subset of Tencent Hosted MCP
-		// using the official tool schemas. This validates the final architecture
-		// without exposing any write-capable CloudBase tools from this temporary
-		// unauthenticated test Worker.
-		try {
-			const hostedTools = await withCachedHostedClient(
-				this.env,
-				async (client) => (await client.listTools()).tools,
-			);
 
-			for (const tool of hostedTools) {
-				if (!READ_ONLY_MIRROR_TOOLS.has(tool.name)) continue;
+		this.server.tool(
+			"queryEnv",
+			"Read-only mirror of Tencent Hosted MCP queryEnv. This test version only allows action=info for the configured environment.",
+			{
+				action: z.literal("info"),
+				envId: z.string().optional(),
+			},
+			async () =>
+				await withCachedHostedClient(this.env, async (client) =>
+					(await client.callTool({
+						name: "queryEnv",
+						arguments: {
+							action: "info",
+							envId: this.env.CLOUDBASE_ENV_ID,
+						},
+					})) as any,
+				),
+		);
 
-				this.server.registerTool(
-					tool.name,
-					{
-						description:
-							tool.description ??
-							`Read-only CloudBase Hosted MCP mirror: ${tool.name}`,
-						inputSchema: tool.inputSchema as any,
-					},
-					async (args: any) =>
-						await withCachedHostedClient(this.env, async (client) => {
-							return (await client.callTool({
-								name: tool.name,
-								arguments: args ?? {},
-							})) as any;
-						}),
-				);
-			}
-		} catch (error) {
-			console.error(
-				"Failed to register read-only Hosted MCP mirror tools:",
-				error instanceof Error ? error.message : String(error),
-			);
-		}
+		this.server.tool(
+			"queryFunctions",
+			"Read-only mirror of Tencent Hosted MCP queryFunctions.",
+			{
+				action: z.enum([
+					"listFunctions",
+					"getFunctionDetail",
+					"listFunctionLogs",
+					"getFunctionLogDetail",
+					"listFunctionLayers",
+					"listLayers",
+					"listLayerVersions",
+					"getLayerVersionDetail",
+					"listFunctionTriggers",
+					"getFunctionDownloadUrl",
+					"getFunctionDeployStatus",
+				]),
+				functionName: z.string().optional(),
+				limit: z.number().optional(),
+				offset: z.number().optional(),
+				codeSecret: z.string().optional(),
+				revealEnvValues: z.boolean().optional(),
+				startTime: z.string().optional(),
+				endTime: z.string().optional(),
+				requestId: z.string().optional(),
+				qualifier: z.string().optional(),
+				runtime: z.string().optional(),
+				searchKey: z.string().optional(),
+				layerName: z.string().optional(),
+				layerVersion: z.number().optional(),
+				taskId: z.string().optional(),
+			},
+			async (args) =>
+				await withCachedHostedClient(this.env, async (client) =>
+					(await client.callTool({
+						name: "queryFunctions",
+						arguments: args,
+					})) as any,
+				),
+		);
+
+		this.server.tool(
+			"queryPgDatabase",
+			"Read-only mirror of Tencent Hosted MCP queryPgDatabase.",
+			{
+				action: z.enum(["context", "objects", "metadata", "schema", "sql"]),
+				sql: z.string().optional(),
+				objectName: z.string().optional(),
+				schema: z.string().optional(),
+				limit: z.number().int().min(1).max(200).optional(),
+			},
+			async (args) =>
+				await withCachedHostedClient(this.env, async (client) =>
+					(await client.callTool({
+						name: "queryPgDatabase",
+						arguments: args,
+					})) as any,
+				),
+		);
 	}
 }
 
