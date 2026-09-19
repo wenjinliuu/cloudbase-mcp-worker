@@ -83,7 +83,6 @@ export async function fetchUpstreamAuthToken({
 // and provided to the DurableMCP as this.props
 export type Props = {
 	login: string;
-	name: string;
-	email: string;
-	accessToken: string;
+	name: string | null;
+	email: string | null;
 };

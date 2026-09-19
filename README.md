@@ -1,51 +1,53 @@
-# Building a Remote MCP Server on Cloudflare (Without Auth)
+# CloudBase Hosted MCP OAuth Gateway
 
-This example allows you to deploy a stateless remote MCP server that doesn't require authentication on Cloudflare Workers. It implements the MCP 2026-07-28 specification while remaining compatible with legacy clients for ordinary tool calls.
+Private OAuth gateway that connects ChatGPT to Tencent CloudBase's official Hosted MCP.
 
-## Get started:
+## Architecture
 
-[![Deploy to Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cloudflare/ai/tree/main/demos/remote-mcp-authless)
+```text
+ChatGPT -> Cloudflare Worker OAuth gateway -> Tencent CloudBase Hosted MCP -> CloudBase environment
+```
 
-This will deploy your MCP server to a URL like: `remote-mcp-server-authless.<your-account>.workers.dev/mcp`
+The Worker does not run the CloudBase MCP package locally. It authenticates the user with GitHub, allows only the configured owner account, exchanges the server-side CloudBase environment API key for an upstream Hosted MCP token, and proxies MCP traffic.
 
-Alternatively, you can use the command line below to get the remote MCP Server created on your local machine:
+## Production endpoint
+
+```text
+https://cloudbase-hosted-oauth-staging.wenjinuu.workers.dev/mcp
+```
+
+Despite the historical `staging` name, this is the current canonical endpoint until a planned URL migration is performed.
+
+## Required configuration
+
+Non-secret variables in `wrangler.hosted-oauth-staging.jsonc`:
+
+- `CLOUDBASE_ENV_ID`
+- `GITHUB_CLIENT_ID`
+
+Cloudflare Worker secrets:
+
+- `CLOUDBASE_API_KEY`
+- `GITHUB_CLIENT_SECRET`
+- `COOKIE_ENCRYPTION_KEY`
+
+KV binding:
+
+- `OAUTH_KV`
+
+## Commands
 
 ```bash
-npm create cloudflare@latest -- my-mcp-server --template=cloudflare/ai/demos/remote-mcp-authless
+npm install
+npm run type-check
+npm run deploy
 ```
 
-## Customizing your MCP Server
+## Security boundaries
 
-To add your own [tools](https://developers.cloudflare.com/agents/model-context-protocol/protocol/tools/) to the MCP server, register each tool on the `McpServer` created in the `createServer()` function in `src/index.ts` using `server.registerTool(...)`.
-
-## Connect to Cloudflare AI Playground
-
-You can connect to your MCP server from the Cloudflare AI Playground, which is a remote MCP client:
-
-1. Go to https://playground.ai.cloudflare.com/
-2. Enter your deployed MCP server URL (`remote-mcp-server-authless.<your-account>.workers.dev/mcp`)
-3. You can now use your MCP tools directly from the playground!
-
-## Connect Claude Desktop to your MCP server
-
-You can also connect to your remote MCP server from local MCP clients, by using the [mcp-remote proxy](https://www.npmjs.com/package/mcp-remote).
-
-To connect to your MCP server from Claude Desktop, follow [Anthropic's Quickstart](https://modelcontextprotocol.io/quickstart/user) and within Claude Desktop go to Settings > Developer > Edit Config.
-
-Update with this configuration:
-
-```json
-{
-	"mcpServers": {
-		"calculator": {
-			"command": "npx",
-			"args": [
-				"mcp-remote",
-				"http://localhost:8787/mcp" // or remote-mcp-server-authless.your-account.workers.dev/mcp
-			]
-		}
-	}
-}
-```
-
-Restart Claude and you should see the tools become available.
+- The GitHub OAuth scope is `read:user`.
+- Only GitHub user `wenjinliuu` may complete authorization.
+- The CloudBase API key remains server-side in Cloudflare Secrets.
+- OAuth state is one-time, session-bound, and stored temporarily in KV.
+- Upstream credentials and Cloudflare forwarding headers are stripped from downstream traffic.
+- CloudBase write operations remain powerful and should require explicit user confirmation.

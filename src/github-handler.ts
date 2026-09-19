@@ -124,9 +124,7 @@ async function redirectToGithub(
  * OAuth Callback Endpoint
  *
  * This route handles the callback from GitHub after user authentication.
- * It exchanges the temporary code for an access token, then stores some
- * user metadata & the auth token as part of the 'props' on the token passed
- * down to the client. It ends by redirecting the client back to _its_ callback URL
+ * It exchanges the temporary code for an access token, then stores only the\n * minimum user metadata required for authorization in the MCP token. It ends by redirecting the client back to _its_ callback URL
  *
  * SECURITY: This endpoint validates that the state parameter from GitHub
  * matches both:
@@ -184,7 +182,6 @@ app.get("/callback", async (c) => {
 		},
 		// This will be available on this.props inside MyMCP
 		props: {
-			accessToken,
 			email,
 			login,
 			name,
