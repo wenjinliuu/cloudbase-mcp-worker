@@ -7,6 +7,7 @@
 	"keep_vars": true,
 	"alias": {
 		"@aws-sdk/client-s3": "./src/stubs/aws-s3.ts",
+		"open": "./src/stubs/open.ts",
 		"yargs": "./src/stubs/yargs.ts",
 	},
 	"vars": {
