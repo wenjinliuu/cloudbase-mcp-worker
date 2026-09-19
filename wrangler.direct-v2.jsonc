@@ -2,7 +2,7 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "cloudbase-mcp-direct-v2",
 	"main": "src/direct-v2.ts",
-	"compatibility_date": "2026-09-20",
+	"compatibility_date": "2026-09-19",
 	"preview_urls": false,
 	"keep_vars": true,
 	"alias": {
