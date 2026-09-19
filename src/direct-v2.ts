@@ -1,4 +1,8 @@
 import { createCloudBaseMcpServer } from "@cloudbase/cloudbase-mcp";
+import {
+	exchangeApiKeyForCredential,
+	type ApiKeyCredentialResult,
+} from "@cloudbase/toolbox";
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { GitHubHandler } from "./github-handler";
@@ -10,6 +14,7 @@ type DirectV2WorkerEnv = Env & {
 	CLOUDBASE_MCP_CLOUD_MODE?: string;
 	CLOUDBASE_MCP_TELEMETRY_DISABLED?: string;
 	TCB_LANG?: string;
+	TCB_REGION?: string;
 	TCB_SITE?: string;
 	TENCENTCLOUD_SECRETID?: string;
 	TENCENTCLOUD_SECRETKEY?: string;
@@ -22,10 +27,14 @@ type AuthenticatedContext = ExecutionContext & {
 
 const ALLOWED_GITHUB_LOGIN = "wenjinliuu";
 const CLOUDBASE_MCP_VERSION = "2.34.4";
+const CREDENTIAL_REFRESH_SKEW_MS = 2 * 60 * 1000;
+
+let cachedCredential: ApiKeyCredentialResult | undefined;
+let credentialExchange: Promise<ApiKeyCredentialResult> | undefined;
 
 function assertBindings(env: DirectV2WorkerEnv): void {
-	if (!env.CLOUDBASE_API_KEY || !env.CLOUDBASE_ENV_ID) {
-		throw new Error("Missing required CloudBase Worker bindings.");
+	if (!env.CLOUDBASE_ENV_ID) {
+		throw new Error("Missing CLOUDBASE_ENV_ID Worker binding.");
 	}
 
 	if (env.CLOUDBASE_MCP_CLOUD_MODE !== "true") {
@@ -39,6 +48,11 @@ function assertBindings(env: DirectV2WorkerEnv): void {
 			"TENCENTCLOUD_SECRETID and TENCENTCLOUD_SECRETKEY must be configured together.",
 		);
 	}
+	if (!env.CLOUDBASE_API_KEY && !hasSecretId) {
+		throw new Error(
+			"Configure CLOUDBASE_API_KEY or a complete Tencent Cloud credential pair.",
+		);
+	}
 }
 
 function safeErrorMessage(error: unknown): string {
@@ -47,6 +61,47 @@ function safeErrorMessage(error: unknown): string {
 		.replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [redacted]")
 		.replace(/eyJ[A-Za-z0-9._~-]{20,}/g, "[redacted-token]")
 		.slice(0, 500);
+}
+
+async function getCloudBaseOptions(env: DirectV2WorkerEnv) {
+	const envId = env.CLOUDBASE_ENV_ID!;
+	const region = env.TCB_REGION || "ap-shanghai";
+
+	// Direct Tencent Cloud credentials are supported for emergency rollback or
+	// environments that do not use a CloudBase API Key.
+	if (env.TENCENTCLOUD_SECRETID && env.TENCENTCLOUD_SECRETKEY) {
+		return {
+			envId,
+			region,
+			secretId: env.TENCENTCLOUD_SECRETID,
+			secretKey: env.TENCENTCLOUD_SECRETKEY,
+			token: env.TENCENTCLOUD_SESSIONTOKEN,
+		};
+	}
+
+	if (
+		cachedCredential?.envId === envId &&
+		cachedCredential.accessTokenExpired > Date.now() + CREDENTIAL_REFRESH_SKEW_MS
+	) {
+		return { ...cachedCredential, region };
+	}
+
+	// The upstream loginByApiKey flow persists credentials through lowdb. That
+	// is appropriate for a desktop CLI, but not for a stateless Worker. Exchange
+	// the API Key directly and inject the resulting STS credential into the MCP
+	// server so manager-node never touches the local credential store.
+	credentialExchange ??= exchangeApiKeyForCredential({
+		apiKey: env.CLOUDBASE_API_KEY!,
+		envId,
+		region,
+	});
+
+	try {
+		cachedCredential = await credentialExchange;
+		return { ...cachedCredential, region };
+	} finally {
+		credentialExchange = undefined;
+	}
 }
 
 async function handleDirectMcp(request: Request, env: DirectV2WorkerEnv): Promise<Response> {
@@ -58,6 +113,7 @@ async function handleDirectMcp(request: Request, env: DirectV2WorkerEnv): Promis
 	}
 
 	assertBindings(env);
+	const cloudBaseOptions = await getCloudBaseOptions(env);
 
 	// A fresh server and transport per request is the MCP SDK's stateless Worker pattern.
 	// JSON responses avoid holding an SSE connection open for ordinary ChatGPT calls.
@@ -69,6 +125,7 @@ async function handleDirectMcp(request: Request, env: DirectV2WorkerEnv): Promis
 		name: "cloudbase-mcp-direct-v2",
 		version: CLOUDBASE_MCP_VERSION,
 		cloudMode: true,
+		cloudBaseOptions,
 		// The official package currently couples Cloud Mode tool filtering to its
 		// telemetry wrapper. Keep the wrapper enabled, while the Wrangler binding
 		// CLOUDBASE_MCP_TELEMETRY_DISABLED=true prevents telemetry transmission.
