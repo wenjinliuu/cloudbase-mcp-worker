@@ -1,3 +1,4 @@
+// Trigger Cloudflare staging deployment
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "cloudbase-hosted-oauth-staging",
