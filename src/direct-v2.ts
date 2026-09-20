@@ -247,6 +247,7 @@ const directDefaultHandler = {
 				credentialMode: "stateless-api-key",
 				cloudBaseMcpModuleFormat: "esm-manager-adapter",
 				managerConstructor: managerCompatibilityProbe.constructor.name,
+				storageDiagnostics: "safe-cos-error-v1",
 			});
 		}
 
