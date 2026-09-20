@@ -7,6 +7,7 @@
 	"keep_vars": true,
 	"alias": {
 		"@aws-sdk/client-s3": "./src/stubs/aws-s3.ts",
+		"@cloudbase/cloudbase-mcp": "./node_modules/@cloudbase/cloudbase-mcp/dist/index.cjs",
 		"open": "./src/stubs/open.ts",
 		"yargs": "./src/stubs/yargs.ts",
 	},
