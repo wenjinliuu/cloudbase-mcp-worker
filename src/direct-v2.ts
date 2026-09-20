@@ -2,13 +2,11 @@ import {
 	createCloudBaseManagerWithOptions,
 	createCloudBaseMcpServer,
 } from "@cloudbase/cloudbase-mcp";
-import {
-	exchangeApiKeyForCredential,
-	type ApiKeyCredentialResult,
-} from "@cloudbase/toolbox";
+import { exchangeApiKeyForCredential, type ApiKeyCredentialResult } from "@cloudbase/toolbox";
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { constants as bufferConstants } from "node:buffer";
+import { sanitizeDirectV2Response } from "./compat/mcp-response";
 import { GitHubHandler } from "./github-handler";
 import type { Props } from "./utils";
 
@@ -55,9 +53,7 @@ function assertBindings(env: DirectV2WorkerEnv): void {
 		);
 	}
 	if (!env.CLOUDBASE_API_KEY && !hasSecretId) {
-		throw new Error(
-			"Configure CLOUDBASE_API_KEY or a complete Tencent Cloud credential pair.",
-		);
+		throw new Error("Configure CLOUDBASE_API_KEY or a complete Tencent Cloud credential pair.");
 	}
 }
 
@@ -157,7 +153,9 @@ function ensureCosBufferBindingCompat(): void {
 	cosBufferBindingCompatInstalled = true;
 }
 
-function ensureHostingWebsiteConfigCompat(manager: ReturnType<typeof createCloudBaseManagerWithOptions>): void {
+function ensureHostingWebsiteConfigCompat(
+	manager: ReturnType<typeof createCloudBaseManagerWithOptions>,
+): void {
 	const hosting = manager.hosting as unknown as {
 		getWebsiteConfig(): Promise<unknown>;
 	};
@@ -172,9 +170,7 @@ function ensureHostingWebsiteConfigCompat(manager: ReturnType<typeof createCloud
 			ensureCosBufferBindingCompat();
 			return await originalGetWebsiteConfig.call(this);
 		} catch (error) {
-			throw new Error(
-				`HOSTING_WEBSITE_CONFIG_FAILED ${safeStorageError(error)}`,
-			);
+			throw new Error(`HOSTING_WEBSITE_CONFIG_FAILED ${safeStorageError(error)}`);
 		}
 	};
 	hostingWebsiteConfigCompatPrototypes.add(prototype);
@@ -278,7 +274,7 @@ async function handleDirectMcp(request: Request, env: DirectV2WorkerEnv): Promis
 	});
 
 	await server.connect(transport);
-	return transport.handleRequest(request);
+	return sanitizeDirectV2Response(await transport.handleRequest(request));
 }
 
 const directMcp = {
@@ -325,6 +321,7 @@ const directDefaultHandler = {
 				managerConstructor: managerCompatibilityProbe.constructor.name,
 				storageDiagnostics: "cos-buffer-binding-v2",
 				hostingDiagnostics: "website-config-cos-v1",
+				responseSanitizer: "list-function-layers-v1",
 			});
 		}
 
