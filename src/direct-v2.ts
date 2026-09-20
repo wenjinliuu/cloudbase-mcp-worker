@@ -1,4 +1,4 @@
-import { createCloudBaseMcpServer } from "@cloudbase/cloudbase-mcp";
+import {\n\tcreateCloudBaseManagerWithOptions,\n\tcreateCloudBaseMcpServer,\n} from "@cloudbase/cloudbase-mcp";
 import {
 	exchangeApiKeyForCredential,
 	type ApiKeyCredentialResult,
@@ -171,12 +171,19 @@ const directMcp = {
 const directDefaultHandler = {
 	async fetch(request, env, ctx) {
 		if (new URL(request.url).pathname === "/health") {
+			const managerCompatibilityProbe = createCloudBaseManagerWithOptions({
+				envId: "compat-probe",
+				secretId: "probe-secret-id",
+				secretKey: "probe-secret-key",
+				region: "ap-shanghai",
+			});
 			return Response.json({
 				ok: true,
 				variant: "cloudbase-mcp-direct-v2",
 				cloudBaseMcpVersion: CLOUDBASE_MCP_VERSION,
 				credentialMode: "stateless-api-key",
-				cloudBaseMcpModuleFormat: "cjs",
+				cloudBaseMcpModuleFormat: "esm-manager-adapter",
+				managerConstructor: managerCompatibilityProbe.constructor.name,
 			});
 		}
 
