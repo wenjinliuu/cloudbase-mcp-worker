@@ -36,6 +36,7 @@ const CREDENTIAL_REFRESH_SKEW_MS = 2 * 60 * 1000;
 let cachedCredential: ApiKeyCredentialResult | undefined;
 let credentialExchange: Promise<ApiKeyCredentialResult> | undefined;
 let cosBufferBindingCompatInstalled = false;
+const hostingWebsiteConfigCompatPrototypes = new WeakSet<object>();
 
 function assertBindings(env: DirectV2WorkerEnv): void {
 	if (!env.CLOUDBASE_ENV_ID) {
@@ -156,6 +157,29 @@ function ensureCosBufferBindingCompat(): void {
 	cosBufferBindingCompatInstalled = true;
 }
 
+function ensureHostingWebsiteConfigCompat(manager: ReturnType<typeof createCloudBaseManagerWithOptions>): void {
+	const hosting = manager.hosting as unknown as {
+		getWebsiteConfig(): Promise<unknown>;
+	};
+	const prototype = Object.getPrototypeOf(hosting) as {
+		getWebsiteConfig(): Promise<unknown>;
+	};
+	if (hostingWebsiteConfigCompatPrototypes.has(prototype)) return;
+
+	const originalGetWebsiteConfig = prototype.getWebsiteConfig;
+	prototype.getWebsiteConfig = async function () {
+		try {
+			ensureCosBufferBindingCompat();
+			return await originalGetWebsiteConfig.call(this);
+		} catch (error) {
+			throw new Error(
+				`HOSTING_WEBSITE_CONFIG_FAILED ${safeStorageError(error)}`,
+			);
+		}
+	};
+	hostingWebsiteConfigCompatPrototypes.add(prototype);
+}
+
 async function getCloudBaseOptions(env: DirectV2WorkerEnv) {
 	const envId = env.CLOUDBASE_ENV_ID!;
 	const region = env.TCB_REGION || "ap-shanghai";
@@ -206,6 +230,11 @@ async function handleDirectMcp(request: Request, env: DirectV2WorkerEnv): Promis
 	}
 
 	assertBindings(env);
+	// COS SDK response parsing uses one legacy Node buffer binding for multiple
+	// read paths (storage listing, hosting website config, and hosted file lists).
+	// Install the narrow public-node:buffer adapter for every Direct V2 request
+	// rather than relying on a previous queryStorage call in the same isolate.
+	ensureCosBufferBindingCompat();
 	const cloudBaseOptions = await getCloudBaseOptions(env);
 
 	// A fresh server and transport per request is the MCP SDK's stateless Worker pattern.
@@ -215,6 +244,7 @@ async function handleDirectMcp(request: Request, env: DirectV2WorkerEnv): Promis
 		enableJsonResponse: true,
 	});
 	const manager = createCloudBaseManagerWithOptions(cloudBaseOptions);
+	ensureHostingWebsiteConfigCompat(manager);
 	const server = await createCloudBaseMcpServer({
 		name: "cloudbase-mcp-direct-v2",
 		version: CLOUDBASE_MCP_VERSION,
@@ -294,6 +324,7 @@ const directDefaultHandler = {
 				cloudBaseMcpModuleFormat: "esm-manager-adapter",
 				managerConstructor: managerCompatibilityProbe.constructor.name,
 				storageDiagnostics: "cos-buffer-binding-v2",
+				hostingDiagnostics: "website-config-cos-v1",
 			});
 		}
 
