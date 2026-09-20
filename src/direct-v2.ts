@@ -30,6 +30,7 @@ type AuthenticatedContext = ExecutionContext & {
 const ALLOWED_GITHUB_LOGIN = "wenjinliuu";
 const CLOUDBASE_MCP_VERSION = "2.34.4";
 const CREDENTIAL_REFRESH_SKEW_MS = 2 * 60 * 1000;
+const WORKER_MIGRATION_PROJECT_ROOT = "/tmp/cloudbase-mcp-direct-v2";
 
 let cachedCredential: ApiKeyCredentialResult | undefined;
 let credentialExchange: Promise<ApiKeyCredentialResult> | undefined;
@@ -55,6 +56,17 @@ function assertBindings(env: DirectV2WorkerEnv): void {
 	if (!env.CLOUDBASE_API_KEY && !hasSecretId) {
 		throw new Error("Configure CLOUDBASE_API_KEY or a complete Tencent Cloud credential pair.");
 	}
+}
+
+function ensureMigrationWorkspaceCompat(): void {
+	// The official PostgreSQL migration flow intentionally writes and verifies a
+	// local SQL file before PreviewPGUserMigrations / PushPGUserMigrations. In a
+	// Worker, process.cwd() resolves to the read-only /bundle filesystem. The
+	// upstream package supports PROJECT_ROOT as an explicit workspace override,
+	// so point only its migration workspace at request-scoped writable /tmp.
+	// This preserves the upstream fail-closed file verification and remote
+	// migration history without pretending that Worker-local files are durable.
+	process.env.PROJECT_ROOT = WORKER_MIGRATION_PROJECT_ROOT;
 }
 
 function safeErrorMessage(error: unknown): string {
@@ -226,6 +238,7 @@ async function handleDirectMcp(request: Request, env: DirectV2WorkerEnv): Promis
 	}
 
 	assertBindings(env);
+	ensureMigrationWorkspaceCompat();
 	// COS SDK response parsing uses one legacy Node buffer binding for multiple
 	// read paths (storage listing, hosting website config, and hosted file lists).
 	// Install the narrow public-node:buffer adapter for every Direct V2 request
@@ -322,6 +335,7 @@ const directDefaultHandler = {
 				storageDiagnostics: "cos-buffer-binding-v2",
 				hostingDiagnostics: "website-config-cos-v1",
 				responseSanitizer: "list-function-layers-v1",
+				migrationWorkspace: WORKER_MIGRATION_PROJECT_ROOT,
 			});
 		}
 
