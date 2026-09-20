@@ -1,4 +1,7 @@
-import {\n\tcreateCloudBaseManagerWithOptions,\n\tcreateCloudBaseMcpServer,\n} from "@cloudbase/cloudbase-mcp";
+import {
+	createCloudBaseManagerWithOptions,
+	createCloudBaseMcpServer,
+} from "@cloudbase/cloudbase-mcp";
 import {
 	exchangeApiKeyForCredential,
 	type ApiKeyCredentialResult,
