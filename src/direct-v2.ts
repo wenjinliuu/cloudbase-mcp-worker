@@ -8,6 +8,7 @@ import {
 } from "@cloudbase/toolbox";
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { constants as bufferConstants } from "node:buffer";
 import { GitHubHandler } from "./github-handler";
 import type { Props } from "./utils";
 
@@ -34,6 +35,7 @@ const CREDENTIAL_REFRESH_SKEW_MS = 2 * 60 * 1000;
 
 let cachedCredential: ApiKeyCredentialResult | undefined;
 let credentialExchange: Promise<ApiKeyCredentialResult> | undefined;
+let cosBufferBindingCompatInstalled = false;
 
 function assertBindings(env: DirectV2WorkerEnv): void {
 	if (!env.CLOUDBASE_ENV_ID) {
@@ -109,6 +111,49 @@ function safeStorageError(error: unknown): string {
 		.replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [redacted]")
 		.replace(/eyJ[A-Za-z0-9._~-]{20,}/g, "[redacted-token]")
 		.slice(0, 800);
+}
+
+function ensureCosBufferBindingCompat(): void {
+	if (cosBufferBindingCompatInstalled) return;
+
+	const runtimeProcess = process as NodeJS.Process & {
+		binding(name: string): unknown;
+	};
+	const originalBinding = runtimeProcess.binding.bind(runtimeProcess);
+	try {
+		const existing = originalBinding("buffer") as { kMaxLength?: number };
+		if (typeof existing?.kMaxLength === "number") {
+			cosBufferBindingCompatInstalled = true;
+			return;
+		}
+	} catch (error) {
+		const code =
+			error && typeof error === "object" && "code" in error
+				? String((error as { code?: unknown }).code)
+				: "";
+		if (code && code !== "ERR_METHOD_NOT_IMPLEMENTED") throw error;
+	}
+
+	// cos-nodejs-sdk-v5 uses this one legacy internal binding only to reject
+	// impossibly large response bodies. Workers exposes the same values through
+	// the public node:buffer API, so adapt just this binding and delegate all
+	// other names to the runtime unchanged.
+	const compatibleBinding = (name: string) => {
+		if (name === "buffer") {
+			return {
+				kMaxLength: bufferConstants.MAX_LENGTH,
+				kStringMaxLength: bufferConstants.MAX_STRING_LENGTH,
+			};
+		}
+		return originalBinding(name);
+	};
+
+	Object.defineProperty(runtimeProcess, "binding", {
+		configurable: true,
+		writable: true,
+		value: compatibleBinding,
+	});
+	cosBufferBindingCompatInstalled = true;
 }
 
 async function getCloudBaseOptions(env: DirectV2WorkerEnv) {
@@ -188,6 +233,7 @@ async function handleDirectMcp(request: Request, env: DirectV2WorkerEnv): Promis
 				// the error code/status/RequestId instead of "[object Object]".
 				listFiles: async ({ cloudPath }) => {
 					try {
+						ensureCosBufferBindingCompat();
 						return await manager.storage.listDirectoryFiles(cloudPath);
 					} catch (error) {
 						throw new Error(`COS_LIST_FAILED ${safeStorageError(error)}`);
@@ -247,7 +293,7 @@ const directDefaultHandler = {
 				credentialMode: "stateless-api-key",
 				cloudBaseMcpModuleFormat: "esm-manager-adapter",
 				managerConstructor: managerCompatibilityProbe.constructor.name,
-				storageDiagnostics: "safe-cos-error-v1",
+				storageDiagnostics: "cos-buffer-binding-v2",
 			});
 		}
 
