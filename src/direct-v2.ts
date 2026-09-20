@@ -66,6 +66,51 @@ function safeErrorMessage(error: unknown): string {
 		.slice(0, 500);
 }
 
+function safeStorageError(error: unknown): string {
+	if (error instanceof Error) return safeErrorMessage(error);
+	if (!error || typeof error !== "object") return String(error).slice(0, 500);
+
+	// cos-nodejs-sdk-v5 sometimes rejects with a plain object. The upstream MCP
+	// currently turns that into "[object Object]", which hides the actionable
+	// COS error code and RequestId. Keep only a strict, non-secret allowlist.
+	const root = error as Record<string, unknown>;
+	const nested =
+		root.error && typeof root.error === "object"
+			? (root.error as Record<string, unknown>)
+			: undefined;
+	const safe: Record<string, unknown> = {};
+	const fields = [
+		"code",
+		"Code",
+		"status",
+		"statusCode",
+		"message",
+		"Message",
+		"errorCode",
+		"ErrorCode",
+		"requestId",
+		"RequestId",
+		"resource",
+		"Resource",
+		"method",
+		"Method",
+	] as const;
+
+	for (const field of fields) {
+		const value = root[field] ?? nested?.[field];
+		if (["string", "number", "boolean"].includes(typeof value)) {
+			safe[field] = value;
+		}
+	}
+
+	return JSON.stringify(
+		Object.keys(safe).length > 0 ? safe : { type: Object.prototype.toString.call(error) },
+	)
+		.replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [redacted]")
+		.replace(/eyJ[A-Za-z0-9._~-]{20,}/g, "[redacted-token]")
+		.slice(0, 800);
+}
+
 async function getCloudBaseOptions(env: DirectV2WorkerEnv) {
 	const envId = env.CLOUDBASE_ENV_ID!;
 	const region = env.TCB_REGION || "ap-shanghai";
@@ -124,6 +169,7 @@ async function handleDirectMcp(request: Request, env: DirectV2WorkerEnv): Promis
 		sessionIdGenerator: undefined,
 		enableJsonResponse: true,
 	});
+	const manager = createCloudBaseManagerWithOptions(cloudBaseOptions);
 	const server = await createCloudBaseMcpServer({
 		name: "cloudbase-mcp-direct-v2",
 		version: CLOUDBASE_MCP_VERSION,
@@ -135,6 +181,20 @@ async function handleDirectMcp(request: Request, env: DirectV2WorkerEnv): Promis
 		enableTelemetry: true,
 		client: "chatgpt",
 		lang: env.TCB_LANG || "zh",
+		pluginOptions: {
+			storage: {
+				// Preserve the official manager-node implementation, but adapt its
+				// plain-object COS rejection into a safe Error so MCP diagnostics retain
+				// the error code/status/RequestId instead of "[object Object]".
+				listFiles: async ({ cloudPath }) => {
+					try {
+						return await manager.storage.listDirectoryFiles(cloudPath);
+					} catch (error) {
+						throw new Error(`COS_LIST_FAILED ${safeStorageError(error)}`);
+					}
+				},
+			},
+		},
 		// The official RAG plugin downloads a template and writes a home-directory
 		// cache even in Cloud Mode. It is documentation search, not cloud management,
 		// so exclude it on Workers until upstream makes it filesystem-free.
