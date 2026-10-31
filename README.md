@@ -43,6 +43,14 @@ npm run type-check
 npm run deploy
 ```
 
+## CloudBase CLI deploy (companion to the MCP)
+
+Code deployment goes through git → GitHub Actions, not through the MCP (the hosted MCP runs in cloud mode and cannot upload function code).
+
+- Reusable workflow: `.github/workflows/cloudbase-deploy.yml` — other repos call it with `uses: wenjinliuu/cloudbase-mcp-worker/.github/workflows/cloudbase-deploy.yml@main`.
+- Credential check: `.github/workflows/cloudbase-cli-check.yml` (manual, read-only).
+- Setup guide, secret instructions and the 2026-10-31 audit (中文): [docs/cloudbase-cli.md](docs/cloudbase-cli.md).
+
 ## Security boundaries
 
 - The GitHub OAuth scope is `read:user`.

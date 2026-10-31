@@ -1,0 +1,27 @@
+name: CloudBase CLI check
+
+# 手动运行：验证本仓库的 CLOUDBASE_API_KEY 能否登录，并列出环境里的云函数（只读）。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      TCB_DISABLE_REPORT: "1"
+      CLOUDBASE_ENV_ID: wenjin-cloudbase-d1empq882391ac1
+      CLOUDBASE_API_KEY: ${{ secrets.CLOUDBASE_API_KEY }}
+    steps:
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+      - run: npm install --global @cloudbase/cli@3.8.3
+      - name: Login and list functions (read-only)
+        run: |
+          test -n "$CLOUDBASE_API_KEY" || { echo "Add CLOUDBASE_API_KEY under Settings → Secrets and variables → Actions"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/cli" && cd "$RUNNER_TEMP/cli"
+          tcb login --cloudbase-api-key "$CLOUDBASE_API_KEY" -e "$CLOUDBASE_ENV_ID" --yes
+          tcb fn list -e "$CLOUDBASE_ENV_ID" | tee -a "$GITHUB_STEP_SUMMARY"

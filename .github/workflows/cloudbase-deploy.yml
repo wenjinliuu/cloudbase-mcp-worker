@@ -1,0 +1,103 @@
+name: CloudBase deploy (reusable)
+
+# 可复用的 CloudBase CLI 部署工作流。其他仓库这样调用：
+#
+#   jobs:
+#     deploy:
+#       uses: wenjinliuu/cloudbase-mcp-worker/.github/workflows/cloudbase-deploy.yml@main
+#       with:
+#         config-dir: .            # 含 cloudbaserc.json 的目录
+#         functions: my-fn other-fn
+#       secrets:
+#         CLOUDBASE_API_KEY: ${{ secrets.CLOUDBASE_API_KEY }}
+#
+# 认证：CloudBase 环境级 API Key（tcb login --cloudbase-api-key）。
+# 它能部署/更新/删除函数、改网关与数据库，能用 --api-key 调用 HTTP 函数；
+# 不能调用事件函数（tcb fn invoke 会报 Cam authentication failed），那需要
+# 腾讯云 CAM 的 SecretId/SecretKey。详见 docs/cloudbase-cli.md。
+
+on:
+  workflow_call:
+    inputs:
+      env-id:
+        description: CloudBase 环境 ID
+        type: string
+        default: wenjin-cloudbase-d1empq882391ac1
+      config-dir:
+        description: 含 cloudbaserc.json 的目录（相对调用方仓库根目录）
+        type: string
+        default: .
+      functions:
+        description: 要部署的函数名，空格分隔；留空则部署 cloudbaserc.json 里的全部函数
+        type: string
+        default: ""
+      cli-version:
+        description: "@cloudbase/cli 版本（固定版本，避免 CLI 升级导致 CI 行为突变）"
+        type: string
+        default: 3.8.3
+    secrets:
+      CLOUDBASE_API_KEY:
+        required: true
+      FUNCTION_ENV_1:
+        required: false
+      FUNCTION_ENV_2:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      TCB_DISABLE_REPORT: "1"
+      CLOUDBASE_ENV_ID: ${{ inputs.env-id }}
+      CLOUDBASE_API_KEY: ${{ secrets.CLOUDBASE_API_KEY }}
+      # cloudbaserc.json 可用 {{env.FUNCTION_ENV_1}} 引用这两个可选密钥
+      FUNCTION_ENV_1: ${{ secrets.FUNCTION_ENV_1 }}
+      FUNCTION_ENV_2: ${{ secrets.FUNCTION_ENV_2 }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+
+      - name: Install CloudBase CLI
+        run: npm install --global "@cloudbase/cli@${{ inputs.cli-version }}"
+
+      - name: Check config
+        working-directory: ${{ inputs.config-dir }}
+        run: |
+          test -f cloudbaserc.json || { echo "cloudbaserc.json not found in ${{ inputs.config-dir }}"; exit 1; }
+          node -e 'const c=require("./cloudbaserc.json"); if (c.envId && c.envId!==process.env.CLOUDBASE_ENV_ID) { console.error(`envId mismatch: ${c.envId} vs ${process.env.CLOUDBASE_ENV_ID}`); process.exit(1) } console.log("functions:", (c.functions||[]).map(f=>f.name).join(", "))'
+
+      - name: Login (environment API key)
+        working-directory: ${{ inputs.config-dir }}
+        run: |
+          test -n "$CLOUDBASE_API_KEY" || { echo "CLOUDBASE_API_KEY secret is empty"; exit 1; }
+          tcb login --cloudbase-api-key "$CLOUDBASE_API_KEY" -e "$CLOUDBASE_ENV_ID" --yes
+
+      - name: Deploy functions
+        working-directory: ${{ inputs.config-dir }}
+        env:
+          FUNCTIONS: ${{ inputs.functions }}
+        run: |
+          if [ -z "$FUNCTIONS" ]; then
+            FUNCTIONS=$(node -e 'console.log((require("./cloudbaserc.json").functions||[]).map(f=>f.name).join(" "))')
+          fi
+          for fn in $FUNCTIONS; do
+            echo "::group::deploy $fn"
+            tcb fn deploy "$fn" --force --yes
+            echo "::endgroup::"
+          done
+          echo "DEPLOYED=$FUNCTIONS" >> "$GITHUB_ENV"
+
+      - name: Verify
+        working-directory: ${{ inputs.config-dir }}
+        run: |
+          tcb fn list -e "$CLOUDBASE_ENV_ID" > "$RUNNER_TEMP/fn-list.txt" 2>&1 || true
+          for fn in $DEPLOYED; do
+            grep -q "$fn" "$RUNNER_TEMP/fn-list.txt" && echo "ok: $fn" || { echo "missing after deploy: $fn"; cat "$RUNNER_TEMP/fn-list.txt"; exit 1; }
+          done
+          { echo "### CloudBase deploy"; echo; for fn in $DEPLOYED; do echo "- \`$fn\` → $CLOUDBASE_ENV_ID"; done; } >> "$GITHUB_STEP_SUMMARY"
